@@ -1,0 +1,5 @@
+langchain-core
+langchain-openai
+pydantic
+PyYAML
+jinja2
