@@ -10,6 +10,7 @@ user_prompt: |
 
   {
     "source_summary": "One short sentence describing what external input enters the program here.",
+    "vulnerability_probability": 0.0,
     "trust_boundary": "Who or what controls the value, for example env, CLI user, config file, network peer, local filesystem.",
     "attacker_control": "none | partial | full | unknown",
     "possible_vulnerability_classes": [
@@ -42,6 +43,8 @@ user_prompt: |
 
   Rules:
   - Keep every list short: 1-4 items.
+  - vulnerability_probability must be a number from 0.0 to 1.0 estimating whether this source can plausibly participate in a vulnerability after sink/path evidence is collected.
+  - Use low values when the source appears internal, constant-like, or only control-flow relevant; use higher values when attacker control is plausible and dangerous sink classes are likely.
   - Do not invent sinks that are not present in the source metadata; describe them as hypotheses to check.
   - Prefer specific vulnerability classes over generic "injection" when possible.
   - priority=high only when the source is highly attacker-controlled and related uses already suggest a dangerous direction.

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -14,6 +14,7 @@ from typing import Any, Literal, TypedDict, cast
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from env_utils import env_optional_int, env_optional_path, env_path, env_str, load_env
 from model import ModelClient
 
 
@@ -40,6 +41,11 @@ class SourceRiskAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_summary: str = Field(description="One sentence describing the source.")
+    vulnerability_probability: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Probability from 0.0 to 1.0 that this source can participate in a vulnerability.",
+    )
     trust_boundary: str = Field(description="Who or what controls this input.")
     attacker_control: Literal["none", "partial", "full", "unknown"] = Field(
         description="Estimated attacker control over the source."
@@ -183,12 +189,17 @@ class SourceRiskModel:
             response_schema=SourceRiskAnalysis,
         )
 
-    def analyze_source(self, source: CandidateSource, index: int) -> SourceAnalysisRecord:
+    def analyze_source(
+        self,
+        source: CandidateSource,
+        index: int,
+        prompt_output_path: Path,
+    ) -> SourceAnalysisRecord:
         source_json = json.dumps(source, ensure_ascii=False, indent=2)
         if len(source_json) > self.config.max_source_chars:
             source_json = source_json[: self.config.max_source_chars]
 
-        analysis = self.model_client.request(source_json)
+        analysis = self.model_client.request(source_json, prompt_output_path=prompt_output_path)
         return {
             "status": "ok",
             "index": index,
@@ -229,7 +240,12 @@ class SourceRiskModel:
         output_dir.mkdir(parents=True, exist_ok=True)
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             futures = {
-                executor.submit(self.analyze_source, source, index): index
+                executor.submit(
+                    self.analyze_source,
+                    source,
+                    index,
+                    output_dir / prompt_filename(source, index),
+                ): index
                 for index, source in enumerate(sources, start=1)
             }
             completed = 0
@@ -291,6 +307,12 @@ def result_filename(record: SourceResultRecord) -> str:
     node = record["nodeId"]
     node_part = f"node_{node}" if node is not None else "node_unknown"
     return f"{record['index']:06d}_{node_part}_{record['status']}.json"
+
+
+def prompt_filename(source: CandidateSource, index: int) -> str:
+    node = source.get("nodeId")
+    node_part = f"node_{node}" if node is not None else "node_unknown"
+    return f"{index:06d}_{node_part}_prompt.json"
 
 
 def write_pretty_json(path: Path, data: SourceResultRecord) -> None:
@@ -359,39 +381,27 @@ def require_number(data: dict[str, Any], key: str, path: Path) -> float:
 
 def main() -> int:
     base_dir = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="Analyze CPG candidate sources with DeepSeek.")
-    parser.add_argument(
-        "--config",
-        default=base_dir / "config" / "model.yaml",
-        help="Path to strict model YAML config.",
+    env_file = os.getenv(
+        "SOURCE_RISK_ENV_FILE",
+        str(base_dir / "config" / "source_risk_model.env"),
     )
-    parser.add_argument(
-        "--model-name",
-        default="source_risk",
-        help="Model profile name inside model YAML config.",
-    )
-    parser.add_argument(
-        "--sources",
-        default=base_dir / "data" / "openstack__kolla__2a4a8fce31c1.sources.json",
-        help="Path to *.sources.json.",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output directory for per-source JSON files.",
-    )
-    parser.add_argument("--limit", type=int, default=None, help="Analyze only first N sources.")
-    parser.add_argument(
-        "--parallel-workers",
-        type=int,
-        default=None,
-        help="Override config parallel_workers.",
-    )
-    args = parser.parse_args()
+    load_env(env_file)
 
-    output = args.output if args.output is not None else default_output_dir_for_sources(args.sources)
-    source_model = SourceRiskModel(args.config, args.model_name)
-    source_model.analyze_sources_file(args.sources, output, args.limit, args.parallel_workers)
+    sources = env_path("SOURCE_RISK_SOURCES")
+    output = env_optional_path("SOURCE_RISK_OUTPUT")
+    if output is None:
+        output = default_output_dir_for_sources(sources)
+
+    source_model = SourceRiskModel(
+        env_path("SOURCE_RISK_MODEL_CONFIG"),
+        env_str("SOURCE_RISK_MODEL_NAME"),
+    )
+    source_model.analyze_sources_file(
+        sources,
+        output,
+        env_optional_int("SOURCE_RISK_LIMIT"),
+        env_optional_int("SOURCE_RISK_PARALLEL_WORKERS"),
+    )
     return 0
 
 

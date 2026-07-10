@@ -14,8 +14,7 @@ user_prompt: |
   Return only valid JSON matching this structure:
 
   {
-    "verdict": "vulnerable | not_vulnerable | needs_more_evidence",
-    "confidence": "0.0 - 1.0",
+    "vulnerability_probability": 0.0,
     "summary": "Short overall conclusion for this source.",
     "source_assessment": {
       "attacker_control": "none | partial | full | unknown",
@@ -29,8 +28,7 @@ user_prompt: |
         "path_index": 0,
         "sink_node_id": 123,
         "sink_kind": "filesystem_write",
-        "verdict": "vulnerable | not_vulnerable | needs_more_evidence",
-        "confidence": "0.0 - 1.0",
+        "vulnerability_probability": 0.0,
         "source_reaches_sink": true,
         "attacker_controls_sink_argument": "none | partial | full | unknown",
         "sanitizers_or_guards": [
@@ -57,9 +55,12 @@ user_prompt: |
   }
 
   Rules:
-  - Do not claim a vulnerability solely because a path reaches a sink.
-  - Prefer needs_more_evidence when the path uses broad CDG/PDG/AST jumps but does not show the source value entering the sink argument.
-  - Mark not_vulnerable when the path is control-only, constant-only, test-only, or clearly disconnected from the sink argument.
+  - Return probabilities, not categorical verdicts.
+  - vulnerability_probability must be a number from 0.0 to 1.0.
+  - Low probability means the evidence points to false positive, control-only flow, constant-only flow, test-only code, or disconnected sink argument.
+  - Medium probability means source/sink reachability is plausible but attacker control, sink argument influence, or sanitizer evidence is incomplete.
+  - High probability means the provided path shows attacker-controlled data plausibly reaching a dangerous sink argument without adequate guards.
+  - Do not assign high probability solely because a path reaches a sink.
   - Keep lists short and high signal.
   - Reference path_index and node ids when making claims.
 

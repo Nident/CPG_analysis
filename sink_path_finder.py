@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict, deque
@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
+
+from env_utils import env_int, env_optional_path, env_path, load_env
 
 
 DIRECTED_TRAVERSAL_EDGES: set[str] = {
@@ -552,41 +554,23 @@ def optional_str(value: Any) -> str | None:
 
 def main() -> int:
     base_dir = Path(__file__).resolve().parent
-    default_sources = base_dir / "data" / "openstack__kolla__2a4a8fce31c1.sources.json"
-    default_cpg = base_dir / "data" / "openstack__kolla__2a4a8fce31c1.json"
+    env_file = os.getenv(
+        "SINK_PATH_ENV_FILE",
+        str(base_dir / "config" / "sink_path_finder.env"),
+    )
+    load_env(env_file)
 
-    parser = argparse.ArgumentParser(description="Find source-to-sink paths in CPG JSON.")
-    parser.add_argument("--sources", default=default_sources, help="Path to *.sources.json.")
-    parser.add_argument("--cpg", default=default_cpg, help="Path to full CPG JSON.")
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output directory for per-source sink path JSON files.",
-    )
-    parser.add_argument("--max-depth", type=int, default=8, help="Max graph traversal depth.")
-    parser.add_argument(
-        "--parallel-workers",
-        type=int,
-        default=4,
-        help="Number of source path extraction workers.",
-    )
-    parser.add_argument(
-        "--max-paths-per-source",
-        type=int,
-        default=25,
-        help="Max reachable sink paths saved for each source.",
-    )
-    args = parser.parse_args()
-
-    sources_path = Path(args.sources)
-    output_dir = Path(args.output) if args.output is not None else output_dir_for_sources(sources_path)
+    sources_path = env_path("SINK_PATH_SOURCES")
+    output_dir = env_optional_path("SINK_PATH_OUTPUT")
+    if output_dir is None:
+        output_dir = output_dir_for_sources(sources_path)
     analyze_sources_to_dir(
         sources_path=sources_path,
-        cpg_path=Path(args.cpg),
+        cpg_path=env_path("SINK_PATH_CPG"),
         output_dir=output_dir,
-        max_depth=args.max_depth,
-        max_paths_per_source=args.max_paths_per_source,
-        parallel_workers=args.parallel_workers,
+        max_depth=env_int("SINK_PATH_MAX_DEPTH"),
+        max_paths_per_source=env_int("SINK_PATH_MAX_PATHS_PER_SOURCE"),
+        parallel_workers=env_int("SINK_PATH_PARALLEL_WORKERS"),
     )
     return 0
 

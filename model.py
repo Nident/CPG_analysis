@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
+import json
+from pathlib import Path
+from typing import Any, Generic, TypeVar
 
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -52,7 +54,10 @@ class ModelClient(Generic[ResponseT]):
         )
         self.chain = self.prompt | self.model | self.parser
 
-    def request(self, source_json: str) -> ResponseT:
+    def request(self, source_json: str, prompt_output_path: str | Path | None = None) -> ResponseT:
+        if prompt_output_path is not None:
+            self.save_rendered_prompt(source_json, Path(prompt_output_path))
+
         last_error: Exception | None = None
         for _ in range(self.max_retries):
             try:
@@ -64,3 +69,19 @@ class ModelClient(Generic[ResponseT]):
         if last_error is None:
             raise RuntimeError("Model request failed without captured exception")
         raise last_error
+
+    def save_rendered_prompt(self, source_json: str, path: Path) -> None:
+        prompt_value = self.prompt.invoke({"source_json": source_json})
+        messages: list[dict[str, Any]] = []
+        for message in prompt_value.to_messages():
+            messages.append(
+                {
+                    "role": message.type,
+                    "content": message.content,
+                }
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"messages": messages}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )

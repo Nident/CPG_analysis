@@ -1,54 +1,19 @@
 #!/usr/bin/env python3
 """Extract candidate taint sources from a Fraunhofer CPG JSON export."""
 
-import argparse
 import csv
 import json
+import os
 import re
 from collections import defaultdict, deque
 from pathlib import Path
 
 import yaml
 
+from env_utils import env_optional_int, env_optional_path, env_path, env_str, load_env
 
-DEFAULT_CONFIG_PATH = Path(__file__).with_name("candidate_source_rules.yml")
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Find likely external-input entry points in a CPG JSON file."
-    )
-    parser.add_argument("cpg", type=Path, help="Fraunhofer CPG JSON export")
-    parser.add_argument("-o", "--out", type=Path, help="Output path")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help=f"YAML rule configuration (default: {DEFAULT_CONFIG_PATH.name})",
-    )
-    parser.add_argument(
-        "--format",
-        choices=("json", "csv"),
-        default="json",
-        help="Output format when --out is set (default: json)",
-    )
-    parser.add_argument(
-        "--dfg-depth",
-        type=int,
-        default=None,
-        help="Override configured outgoing data-flow depth",
-    )
-    parser.add_argument(
-        "--language",
-        default="auto",
-        help="Source rule set to use: auto, all, or a configured language name (default: auto)",
-    )
-    parser.add_argument(
-        "--include-low-confidence",
-        action="store_true",
-        help="Include broad/noisier sources such as socket recv calls",
-    )
-    return parser.parse_args()
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config" / "candidate_source_rules.yml"
 
 
 def code_of(node):
@@ -475,40 +440,56 @@ def write_csv(path, findings):
 
 
 def main():
-    args = parse_args()
-    if args.dfg_depth is not None and args.dfg_depth < 0:
+    base_dir = Path(__file__).resolve().parent
+    env_file = os.getenv(
+        "SOURCES_CANDIDATE_ENV_FILE",
+        str(base_dir / "config" / "sources_candidate_finder.env"),
+    )
+    load_env(env_file)
+
+    cpg = env_path("SOURCES_CANDIDATE_CPG")
+    out = env_optional_path("SOURCES_CANDIDATE_OUT")
+    config_path = env_path("SOURCES_CANDIDATE_CONFIG")
+    output_format = env_str("SOURCES_CANDIDATE_FORMAT")
+    if output_format not in {"json", "csv"}:
+        raise SystemExit("SOURCES_CANDIDATE_FORMAT must be json or csv")
+    dfg_depth = env_optional_int("SOURCES_CANDIDATE_DFG_DEPTH")
+    language = env_str("SOURCES_CANDIDATE_LANGUAGE")
+    include_low_confidence = env_str("SOURCES_CANDIDATE_INCLUDE_LOW_CONFIDENCE").lower() == "true"
+
+    if dfg_depth is not None and dfg_depth < 0:
         raise SystemExit("--dfg-depth must be zero or greater")
 
-    config = load_rule_config(args.config)
-    with args.cpg.open(encoding="utf-8") as source:
-        cpg = json.load(source)
+    config = load_rule_config(config_path)
+    with cpg.open(encoding="utf-8") as source:
+        cpg_payload = json.load(source)
 
-    languages = selected_languages(cpg, args.language, config)
+    languages = selected_languages(cpg_payload, language, config)
     findings = extract(
-        cpg,
+        cpg_payload,
         languages=languages,
         config=config,
-        dfg_depth=args.dfg_depth,
-        include_low_confidence=args.include_low_confidence,
+        dfg_depth=dfg_depth,
+        include_low_confidence=include_low_confidence,
     )
 
     payload = {
-        "sourceFile": str(args.cpg),
-        "configFile": str(args.config),
+        "sourceFile": str(cpg),
+        "configFile": str(config_path),
         "ruleLanguages": sorted(languages),
         "candidateSourceCount": len(findings),
         "candidateSources": findings,
     }
 
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        if args.format == "json":
-            args.out.write_text(
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if output_format == "json":
+            out.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
         else:
-            write_csv(args.out, findings)
+            write_csv(out, findings)
 
     print(f"candidate sources: {len(findings)}")
     for item in findings[:20]:
@@ -527,4 +508,4 @@ if __name__ == "__main__":
 
 
 
-# python3 extract_candidate_sources.py data/openstack__kolla__2a4a8fce31c1.json -o data/openstack__kolla__2a4a8fce31c1.sources.json
+# python3 sources_candidate_finder.py data/openstack__kolla__2a4a8fce31c1.json -o data/openstack__kolla__2a4a8fce31c1.sources.json

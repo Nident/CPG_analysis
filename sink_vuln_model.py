@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -14,10 +14,10 @@ from typing import Any, Literal, TypedDict, cast
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from env_utils import env_int, env_optional_int, env_optional_path, env_path, env_str, load_env
 from model import ModelClient
 
 
-Verdict = Literal["vulnerable", "not_vulnerable", "needs_more_evidence"]
 Confidence = Literal["low", "medium", "high"]
 AttackerControl = Literal["none", "partial", "full", "unknown"]
 
@@ -36,8 +36,11 @@ class PathAssessment(BaseModel):
     path_index: int
     sink_node_id: int
     sink_kind: str
-    verdict: Verdict
-    confidence: Confidence
+    vulnerability_probability: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Probability from 0.0 to 1.0 that this specific path is exploitable.",
+    )
     source_reaches_sink: bool
     attacker_controls_sink_argument: AttackerControl
     sanitizers_or_guards: list[str]
@@ -56,8 +59,11 @@ class InterestingPath(BaseModel):
 class SinkVulnerabilityAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    verdict: Verdict
-    confidence: Confidence
+    vulnerability_probability: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall probability from 0.0 to 1.0 that this source/path bundle contains a vulnerability.",
+    )
     summary: str
     source_assessment: SourceAssessment
     path_assessments: list[PathAssessment]
@@ -177,7 +183,7 @@ class SinkVulnModel:
             response_schema=SinkVulnerabilityAnalysis,
         )
 
-    def analyze_file(self, path_file: Path) -> OutputRecord:
+    def analyze_file(self, path_file: Path, prompt_output_path: Path) -> OutputRecord:
         path_record = load_json_object(path_file)
         source_node_id = optional_int(path_record.get("sourceNodeId"))
         previous_entry = (
@@ -195,7 +201,7 @@ class SinkVulnModel:
             "previous_source_analysis": previous_analysis,
         }
         payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
-        analysis = self.model_client.request(payload_json)
+        analysis = self.model_client.request(payload_json, prompt_output_path=prompt_output_path)
         return {
             "status": "ok",
             "sourceNodeId": source_node_id,
@@ -229,7 +235,14 @@ class SinkVulnModel:
 
         summaries: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self.analyze_file, path_file): path_file for path_file in files}
+            futures = {
+                executor.submit(
+                    self.analyze_file,
+                    path_file,
+                    output / prompt_filename(path_file),
+                ): path_file
+                for path_file in files
+            }
             completed = 0
             for future in as_completed(futures):
                 input_file = futures[future]
@@ -374,6 +387,15 @@ def output_filename(input_file: Path, status: str) -> str:
     return f"{name}_{status}.json"
 
 
+def prompt_filename(input_file: Path) -> str:
+    name = input_file.name
+    if name.endswith("_ok.json"):
+        name = name.removesuffix("_ok.json")
+    else:
+        name = input_file.stem
+    return f"{name}_prompt.json"
+
+
 def load_json_object(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -461,81 +483,33 @@ def default_output_dir(sink_paths_dir: Path) -> Path:
 
 def main() -> int:
     base_dir = Path(__file__).resolve().parent
-    default_paths = default_sink_paths_dir(base_dir)
+    env_file = os.getenv(
+        "SINK_VULN_ENV_FILE",
+        str(base_dir / "config" / "sink_vuln_model.env"),
+    )
+    load_env(env_file)
 
-    parser = argparse.ArgumentParser(description="Analyze source-to-sink paths with an LLM.")
-    parser.add_argument(
-        "--model-config",
-        default=base_dir / "config" / "model.yaml",
-        help="Path to model YAML with base_url/api_key/model parameters.",
-    )
-    parser.add_argument(
-        "--model-name",
-        default="sink_vuln",
-        help="Model profile name inside model YAML config.",
-    )
-    parser.add_argument(
-        "--prompt",
-        default=None,
-        help="Override prompt YAML path. Defaults to prompt_file from selected model profile.",
-    )
-    parser.add_argument(
-        "--sink-paths-dir",
-        default=default_paths,
-        help="Directory with per-source source-to-sink path JSON files.",
-    )
-    parser.add_argument(
-        "--source-analysis-dir",
-        default=None,
-        help="Directory with previous per-source LLM analysis JSON files.",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output directory for per-source vulnerability analysis JSON files.",
-    )
-    parser.add_argument("--limit", type=int, default=None, help="Analyze only first N files.")
-    parser.add_argument(
-        "--parallel-workers",
-        type=int,
-        default=None,
-        help="Override config parallel_workers.",
-    )
-    parser.add_argument(
-        "--max-paths",
-        type=int,
-        default=10,
-        help="Max source-to-sink paths included in one LLM request.",
-    )
-    parser.add_argument(
-        "--max-node-code-chars",
-        type=int,
-        default=1200,
-        help="Max code characters kept per graph node in the LLM payload.",
-    )
-    args = parser.parse_args()
-
-    sink_paths_dir = Path(args.sink_paths_dir)
-    source_analysis_dir = (
-        Path(args.source_analysis_dir)
-        if args.source_analysis_dir is not None
-        else default_source_analysis_dir(sink_paths_dir)
-    )
-    output_dir = Path(args.output) if args.output is not None else default_output_dir(sink_paths_dir)
+    sink_paths_dir = env_path("SINK_VULN_SINK_PATHS_DIR")
+    source_analysis_dir = env_optional_path("SINK_VULN_SOURCE_ANALYSIS_DIR")
+    if source_analysis_dir is None:
+        source_analysis_dir = default_source_analysis_dir(sink_paths_dir)
+    output_dir = env_optional_path("SINK_VULN_OUTPUT")
+    if output_dir is None:
+        output_dir = default_output_dir(sink_paths_dir)
 
     model = SinkVulnModel(
-        model_config_path=args.model_config,
-        model_name=args.model_name,
-        prompt_path=args.prompt,
+        model_config_path=env_path("SINK_VULN_MODEL_CONFIG"),
+        model_name=env_str("SINK_VULN_MODEL_NAME"),
+        prompt_path=env_optional_path("SINK_VULN_PROMPT"),
         source_analysis_dir=source_analysis_dir,
-        max_paths=args.max_paths,
-        max_node_code_chars=args.max_node_code_chars,
+        max_paths=env_int("SINK_VULN_MAX_PATHS"),
+        max_node_code_chars=env_int("SINK_VULN_MAX_NODE_CODE_CHARS"),
     )
     model.analyze_dir(
         sink_paths_dir=sink_paths_dir,
         output_dir=output_dir,
-        parallel_workers=args.parallel_workers,
-        limit=args.limit,
+        parallel_workers=env_optional_int("SINK_VULN_PARALLEL_WORKERS"),
+        limit=env_optional_int("SINK_VULN_LIMIT"),
     )
     return 0
 
