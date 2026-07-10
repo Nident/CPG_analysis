@@ -81,6 +81,7 @@ class CandidateSource(TypedDict, total=False):
 
 
 class SourceAnalysisRecord(TypedDict):
+    status: Literal["ok"]
     index: int
     nodeId: int | None
     artifact: str | None
@@ -89,6 +90,21 @@ class SourceAnalysisRecord(TypedDict):
     kind: str | None
     ruleId: str | None
     analysis: dict[str, Any]
+
+
+class SourceErrorRecord(TypedDict):
+    status: Literal["error"]
+    index: int
+    nodeId: int | None
+    artifact: str | None
+    startLine: int | None
+    endLine: int | None
+    kind: str | None
+    ruleId: str | None
+    error: dict[str, str]
+
+
+SourceResultRecord = SourceAnalysisRecord | SourceErrorRecord
 
 
 @dataclass(frozen=True)
@@ -104,8 +120,8 @@ class ModelConfig:
     parallel_workers: int
 
     @classmethod
-    def from_yaml(cls, path: Path) -> ModelConfig:
-        data = load_yaml_mapping(path)
+    def from_yaml(cls, path: Path, model_name: str) -> ModelConfig:
+        data = load_model_mapping(path, model_name)
         required = {
             "base_url",
             "api_key",
@@ -152,8 +168,8 @@ class PromptConfig:
 class SourceRiskModel:
     """Loads configs and sources, prepares payloads, runs model calls, writes results."""
 
-    def __init__(self, config_path: str | Path) -> None:
-        self.config = ModelConfig.from_yaml(Path(config_path))
+    def __init__(self, config_path: str | Path, model_name: str) -> None:
+        self.config = ModelConfig.from_yaml(Path(config_path), model_name)
         self.prompts = PromptConfig.from_yaml(self.config.prompt_file)
         self.model_client = ModelClient[SourceRiskAnalysis](
             base_url=self.config.base_url,
@@ -174,6 +190,7 @@ class SourceRiskModel:
 
         analysis = self.model_client.request(source_json)
         return {
+            "status": "ok",
             "index": index,
             "nodeId": source.get("nodeId"),
             "artifact": source.get("artifact"),
@@ -187,7 +204,7 @@ class SourceRiskModel:
     def analyze_sources_file(
         self,
         sources_path: str | Path,
-        output_path: str | Path,
+        output_dir: str | Path,
         limit: int | None,
         parallel_workers: int | None,
     ) -> None:
@@ -196,38 +213,42 @@ class SourceRiskModel:
             sources = sources[:limit]
 
         workers = parallel_workers if parallel_workers is not None else self.config.parallel_workers
-        results = self.analyze_sources_parallel(sources, workers)
+        self.analyze_sources_parallel_to_dir(sources, Path(output_dir), workers)
 
-        output = Path(output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with output.open("w", encoding="utf-8") as f:
-            for record in sorted(results, key=lambda item: item["index"]):
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def analyze_sources_parallel(
+    def analyze_sources_parallel_to_dir(
         self,
         sources: list[CandidateSource],
+        output_dir: Path,
         parallel_workers: int,
-    ) -> list[SourceAnalysisRecord]:
+    ) -> None:
         if parallel_workers < 1:
             raise ValueError("parallel_workers must be >= 1")
+        if output_dir.exists() and not output_dir.is_dir():
+            raise ValueError(f"{output_dir}: output path must be a directory")
 
-        results: list[SourceAnalysisRecord] = []
+        output_dir.mkdir(parents=True, exist_ok=True)
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             futures = {
                 executor.submit(self.analyze_source, source, index): index
                 for index, source in enumerate(sources, start=1)
             }
+            completed = 0
             for future in as_completed(futures):
                 index = futures[future]
-                record = future.result()
-                results.append(record)
+                source = sources[index - 1]
+                try:
+                    record: SourceResultRecord = future.result()
+                except Exception as error:
+                    record = build_error_record(source, index, error)
+
+                completed += 1
+                output_file = output_dir / result_filename(record)
+                write_pretty_json(output_file, record)
                 print(
-                    f"[{len(results)}/{len(sources)}] analyzed index={index} "
-                    f"nodeId={record['nodeId']}",
+                    f"[{completed}/{len(sources)}] saved {record['status']} "
+                    f"index={index} nodeId={record['nodeId']} -> {output_file}",
                     file=sys.stderr,
                 )
-        return results
 
 
 def load_candidate_sources(path: Path) -> list[CandidateSource]:
@@ -245,11 +266,68 @@ def load_candidate_sources(path: Path) -> list[CandidateSource]:
     return cast(list[CandidateSource], candidate_sources)
 
 
+def build_error_record(
+    source: CandidateSource,
+    index: int,
+    error: Exception,
+) -> SourceErrorRecord:
+    return {
+        "status": "error",
+        "index": index,
+        "nodeId": source.get("nodeId"),
+        "artifact": source.get("artifact"),
+        "startLine": source.get("startLine"),
+        "endLine": source.get("endLine"),
+        "kind": source.get("kind"),
+        "ruleId": source.get("ruleId"),
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+    }
+
+
+def result_filename(record: SourceResultRecord) -> str:
+    node = record["nodeId"]
+    node_part = f"node_{node}" if node is not None else "node_unknown"
+    return f"{record['index']:06d}_{node_part}_{record['status']}.json"
+
+
+def write_pretty_json(path: Path, data: SourceResultRecord) -> None:
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def default_output_dir_for_sources(sources_path: str | Path) -> Path:
+    path = Path(sources_path)
+    name = path.name
+    if not name.endswith(".sources.json"):
+        raise ValueError(f"{path}: sources filename must end with .sources.json")
+    return path.parent.parent / "outputs" / name.removesuffix(".sources.json")
+
+
 def load_yaml_mapping(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise TypeError(f"{path}: expected YAML mapping")
     return cast(dict[str, Any], data)
+
+
+def load_model_mapping(path: Path, model_name: str) -> dict[str, Any]:
+    data = load_yaml_mapping(path)
+    assert_exact_keys(data, {"api_key", "models"}, path)
+    api_key = require_type(data, "api_key", str, path)
+    models = data["models"]
+    if not isinstance(models, dict):
+        raise TypeError(f"{path}: models must be a mapping")
+    if model_name not in models:
+        raise ValueError(f"{path}: model profile not found: {model_name}")
+    model_data = models[model_name]
+    if not isinstance(model_data, dict):
+        raise TypeError(f"{path}: models.{model_name} must be a mapping")
+    return {"api_key": api_key, **cast(dict[str, Any], model_data)}
 
 
 def assert_exact_keys(data: dict[str, Any], expected: set[str], path: Path) -> None:
@@ -288,14 +366,19 @@ def main() -> int:
         help="Path to strict model YAML config.",
     )
     parser.add_argument(
+        "--model-name",
+        default="source_risk",
+        help="Model profile name inside model YAML config.",
+    )
+    parser.add_argument(
         "--sources",
         default=base_dir / "data" / "openstack__kolla__2a4a8fce31c1.sources.json",
         help="Path to *.sources.json.",
     )
     parser.add_argument(
         "--output",
-        default=base_dir / "data" / "source_model_analysis.jsonl",
-        help="Output JSONL path.",
+        default=None,
+        help="Output directory for per-source JSON files.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Analyze only first N sources.")
     parser.add_argument(
@@ -306,8 +389,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    source_model = SourceRiskModel(args.config)
-    source_model.analyze_sources_file(args.sources, args.output, args.limit, args.parallel_workers)
+    output = args.output if args.output is not None else default_output_dir_for_sources(args.sources)
+    source_model = SourceRiskModel(args.config, args.model_name)
+    source_model.analyze_sources_file(args.sources, output, args.limit, args.parallel_workers)
     return 0
 
 

@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""LLM verifier for source-to-sink path vulnerability analysis."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+from model import ModelClient
+
+
+Verdict = Literal["vulnerable", "not_vulnerable", "needs_more_evidence"]
+Confidence = Literal["low", "medium", "high"]
+AttackerControl = Literal["none", "partial", "full", "unknown"]
+
+
+class SourceAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attacker_control: AttackerControl
+    trust_boundary: str
+    relevant_previous_hypotheses: list[str]
+
+
+class PathAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path_index: int
+    sink_node_id: int
+    sink_kind: str
+    verdict: Verdict
+    confidence: Confidence
+    source_reaches_sink: bool
+    attacker_controls_sink_argument: AttackerControl
+    sanitizers_or_guards: list[str]
+    blocking_conditions: list[str]
+    evidence: list[str]
+    reasoning: str
+
+
+class InterestingPath(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path_index: int
+    why: str
+
+
+class SinkVulnerabilityAnalysis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Verdict
+    confidence: Confidence
+    summary: str
+    source_assessment: SourceAssessment
+    path_assessments: list[PathAssessment]
+    most_interesting_paths: list[InterestingPath]
+    follow_up_checks: list[str]
+
+
+class AnalysisRecord(TypedDict):
+    status: Literal["ok"]
+    sourceNodeId: int | None
+    inputFile: str
+    previousSourceAnalysisFile: str | None
+    analysis: dict[str, Any]
+
+
+class ErrorRecord(TypedDict):
+    status: Literal["error"]
+    sourceNodeId: int | None
+    inputFile: str
+    previousSourceAnalysisFile: str | None
+    error: dict[str, str]
+
+
+OutputRecord = AnalysisRecord | ErrorRecord
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float
+    max_tokens: int
+    timeout: int
+    prompt_file: Path
+    parallel_workers: int
+
+    @classmethod
+    def from_yaml(cls, path: Path, model_name: str) -> ModelConfig:
+        data = load_model_mapping(path, model_name)
+        required = {
+            "base_url",
+            "api_key",
+            "model",
+            "temperature",
+            "max_tokens",
+            "timeout",
+            "max_source_chars",
+            "prompt_file",
+            "parallel_workers",
+        }
+        assert_exact_keys(data, required, path)
+        prompt_file = Path(require_type(data, "prompt_file", str, path))
+        if not prompt_file.is_absolute():
+            prompt_file = path.parent / prompt_file
+        return cls(
+            base_url=require_type(data, "base_url", str, path),
+            api_key=require_type(data, "api_key", str, path),
+            model=require_type(data, "model", str, path),
+            temperature=require_number(data, "temperature", path),
+            max_tokens=require_type(data, "max_tokens", int, path),
+            timeout=require_type(data, "timeout", int, path),
+            prompt_file=prompt_file,
+            parallel_workers=require_type(data, "parallel_workers", int, path),
+        )
+
+
+@dataclass(frozen=True)
+class PromptConfig:
+    system_prompt: str
+    user_prompt: str
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> PromptConfig:
+        data = load_yaml_mapping(path)
+        assert_exact_keys(data, {"system_prompt", "user_prompt"}, path)
+        return cls(
+            system_prompt=require_type(data, "system_prompt", str, path),
+            user_prompt=require_type(data, "user_prompt", str, path),
+        )
+
+
+class SinkVulnModel:
+    """Loads path bundles, attaches previous source reasoning, and runs LLM verification."""
+
+    def __init__(
+        self,
+        model_config_path: str | Path,
+        model_name: str,
+        prompt_path: str | Path | None,
+        source_analysis_dir: str | Path | None,
+        max_paths: int,
+        max_node_code_chars: int,
+    ) -> None:
+        if max_paths < 1:
+            raise ValueError("max_paths must be >= 1")
+        if max_node_code_chars < 1:
+            raise ValueError("max_node_code_chars must be >= 1")
+
+        self.model_config = ModelConfig.from_yaml(Path(model_config_path), model_name)
+        resolved_prompt_path = Path(prompt_path) if prompt_path is not None else self.model_config.prompt_file
+        self.prompt_config = PromptConfig.from_yaml(resolved_prompt_path)
+        self.source_analysis_index = load_source_analysis_index(
+            Path(source_analysis_dir) if source_analysis_dir is not None else None
+        )
+        self.max_paths = max_paths
+        self.max_node_code_chars = max_node_code_chars
+        self.model_client = ModelClient[SinkVulnerabilityAnalysis](
+            base_url=self.model_config.base_url,
+            api_key=self.model_config.api_key,
+            model=self.model_config.model,
+            temperature=self.model_config.temperature,
+            max_tokens=self.model_config.max_tokens,
+            timeout=self.model_config.timeout,
+            system_prompt=self.prompt_config.system_prompt,
+            user_prompt=self.prompt_config.user_prompt,
+            response_schema=SinkVulnerabilityAnalysis,
+        )
+
+    def analyze_file(self, path_file: Path) -> OutputRecord:
+        path_record = load_json_object(path_file)
+        source_node_id = optional_int(path_record.get("sourceNodeId"))
+        previous_entry = (
+            self.source_analysis_index.get(source_node_id)
+            if source_node_id is not None
+            else None
+        )
+        previous_analysis = previous_entry.data if previous_entry is not None else None
+        payload = {
+            "source_path_record": compact_path_record(
+                path_record,
+                max_paths=self.max_paths,
+                max_node_code_chars=self.max_node_code_chars,
+            ),
+            "previous_source_analysis": previous_analysis,
+        }
+        payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+        analysis = self.model_client.request(payload_json)
+        return {
+            "status": "ok",
+            "sourceNodeId": source_node_id,
+            "inputFile": str(path_file),
+            "previousSourceAnalysisFile": (
+                str(previous_entry.path) if previous_entry is not None else None
+            ),
+            "analysis": analysis.model_dump(),
+        }
+
+    def analyze_dir(
+        self,
+        sink_paths_dir: str | Path,
+        output_dir: str | Path,
+        parallel_workers: int | None,
+        limit: int | None,
+    ) -> None:
+        input_dir = Path(sink_paths_dir)
+        files = discover_path_files(input_dir)
+        if limit is not None:
+            files = files[:limit]
+
+        output = Path(output_dir)
+        if output.exists() and not output.is_dir():
+            raise ValueError(f"{output}: output path must be a directory")
+        output.mkdir(parents=True, exist_ok=True)
+
+        workers = parallel_workers if parallel_workers is not None else self.model_config.parallel_workers
+        if workers < 1:
+            raise ValueError("parallel_workers must be >= 1")
+
+        summaries: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(self.analyze_file, path_file): path_file for path_file in files}
+            completed = 0
+            for future in as_completed(futures):
+                input_file = futures[future]
+                try:
+                    record: OutputRecord = future.result()
+                except Exception as error:
+                    source_node_id = source_node_id_from_file(input_file)
+                    previous_entry = (
+                        self.source_analysis_index.get(source_node_id)
+                        if source_node_id is not None
+                        else None
+                    )
+                    record = {
+                        "status": "error",
+                        "sourceNodeId": source_node_id,
+                        "inputFile": str(input_file),
+                        "previousSourceAnalysisFile": (
+                            str(previous_entry.path) if previous_entry is not None else None
+                        ),
+                        "error": {
+                            "type": type(error).__name__,
+                            "message": str(error),
+                        },
+                    }
+
+                completed += 1
+                output_file = output / output_filename(input_file, record["status"])
+                write_pretty_json(output_file, record)
+                summaries.append(
+                    {
+                        "inputFile": str(input_file),
+                        "outputFile": output_file.name,
+                        "sourceNodeId": record["sourceNodeId"],
+                        "status": record["status"],
+                    }
+                )
+                print(
+                    f"[{completed}/{len(files)}] saved {record['status']} "
+                    f"sourceNodeId={record['sourceNodeId']} -> {output_file}",
+                    file=sys.stderr,
+                )
+
+        write_pretty_json(
+            output / "summary.json",
+            {
+                "status": "ok",
+                "sinkPathsDir": str(input_dir),
+                "outputDir": str(output),
+                "sourceAnalysisDir": source_analysis_dir_string(self.source_analysis_index),
+                "fileCount": len(files),
+                "parallelWorkers": workers,
+                "maxPaths": self.max_paths,
+                "maxNodeCodeChars": self.max_node_code_chars,
+                "results": sorted(summaries, key=lambda item: item["inputFile"]),
+            },
+        )
+
+
+@dataclass(frozen=True)
+class SourceAnalysisEntry:
+    path: Path
+    data: dict[str, Any]
+
+
+def discover_path_files(input_dir: Path) -> list[Path]:
+    if not input_dir.is_dir():
+        raise ValueError(f"{input_dir}: sink paths input must be a directory")
+    return sorted(
+        path
+        for path in input_dir.glob("*_ok.json")
+        if path.name != "summary.json" and path.name != "sink_candidates.json"
+    )
+
+
+def compact_path_record(
+    data: dict[str, Any],
+    max_paths: int,
+    max_node_code_chars: int,
+) -> dict[str, Any]:
+    compacted = deep_compact(data, max_node_code_chars)
+    paths = compacted.get("paths")
+    if isinstance(paths, list):
+        compacted["paths"] = paths[:max_paths]
+        compacted["omittedPathCount"] = max(0, len(paths) - max_paths)
+    return compacted
+
+
+def deep_compact(value: Any, max_node_code_chars: int) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: compact_string(val, max_node_code_chars)
+            if key == "code" and isinstance(val, str)
+            else deep_compact(val, max_node_code_chars)
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [deep_compact(item, max_node_code_chars) for item in value]
+    return value
+
+
+def compact_string(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + "\n...<truncated>"
+
+
+def load_source_analysis_index(source_analysis_dir: Path | None) -> dict[int, SourceAnalysisEntry]:
+    if source_analysis_dir is None or not source_analysis_dir.exists():
+        return {}
+    if not source_analysis_dir.is_dir():
+        raise ValueError(f"{source_analysis_dir}: source analysis path must be a directory")
+
+    index: dict[int, SourceAnalysisEntry] = {}
+    for path in sorted(source_analysis_dir.glob("*_ok.json")):
+        data = load_json_object(path)
+        node_id = optional_int(data.get("nodeId"))
+        if node_id is None:
+            node_id = optional_int(data.get("sourceNodeId"))
+        if node_id is not None:
+            index[node_id] = SourceAnalysisEntry(path, data)
+    return index
+
+
+def source_analysis_dir_string(index: dict[int, SourceAnalysisEntry]) -> str | None:
+    if not index:
+        return None
+    first = next(iter(index.values()))
+    return str(first.path.parent)
+
+
+def source_node_id_from_file(path: Path) -> int | None:
+    data = load_json_object(path)
+    return optional_int(data.get("sourceNodeId"))
+
+
+def output_filename(input_file: Path, status: str) -> str:
+    name = input_file.name
+    if name.endswith("_ok.json"):
+        name = name.removesuffix("_ok.json")
+    else:
+        name = input_file.stem
+    return f"{name}_{status}.json"
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise TypeError(f"{path}: expected JSON object")
+    return cast(dict[str, Any], data)
+
+
+def write_pretty_json(path: Path, data: Any) -> None:
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_yaml_mapping(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise TypeError(f"{path}: expected YAML mapping")
+    return cast(dict[str, Any], data)
+
+
+def load_model_mapping(path: Path, model_name: str) -> dict[str, Any]:
+    data = load_yaml_mapping(path)
+    assert_exact_keys(data, {"api_key", "models"}, path)
+    api_key = require_type(data, "api_key", str, path)
+    models = data["models"]
+    if not isinstance(models, dict):
+        raise TypeError(f"{path}: models must be a mapping")
+    if model_name not in models:
+        raise ValueError(f"{path}: model profile not found: {model_name}")
+    model_data = models[model_name]
+    if not isinstance(model_data, dict):
+        raise TypeError(f"{path}: models.{model_name} must be a mapping")
+    return {"api_key": api_key, **cast(dict[str, Any], model_data)}
+
+
+def assert_exact_keys(data: dict[str, Any], expected: set[str], path: Path) -> None:
+    actual = set(data)
+    missing = expected - actual
+    extra = actual - expected
+    if missing or extra:
+        raise ValueError(f"{path}: missing={sorted(missing)} extra={sorted(extra)}")
+
+
+def require_type(
+    data: dict[str, Any],
+    key: str,
+    expected_type: type[str] | type[int],
+    path: Path,
+) -> Any:
+    value = data[key]
+    if not isinstance(value, expected_type):
+        raise TypeError(f"{path}: {key} must be {expected_type.__name__}")
+    return value
+
+
+def require_number(data: dict[str, Any], key: str, path: Path) -> float:
+    value = data[key]
+    if not isinstance(value, int | float):
+        raise TypeError(f"{path}: {key} must be int or float")
+    return float(value)
+
+
+def optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def default_sink_paths_dir(base_dir: Path) -> Path:
+    return base_dir / "outputs" / "openstack__kolla__2a4a8fce31c1_sink_paths"
+
+
+def default_source_analysis_dir(sink_paths_dir: Path) -> Path:
+    name = sink_paths_dir.name
+    if name.endswith("_sink_paths"):
+        return sink_paths_dir.parent / name.removesuffix("_sink_paths")
+    return sink_paths_dir.parent / "source_model_analysis"
+
+
+def default_output_dir(sink_paths_dir: Path) -> Path:
+    name = sink_paths_dir.name
+    if name.endswith("_sink_paths"):
+        name = name.removesuffix("_sink_paths")
+    return sink_paths_dir.parent / f"{name}_sink_vuln_analysis"
+
+
+def main() -> int:
+    base_dir = Path(__file__).resolve().parent
+    default_paths = default_sink_paths_dir(base_dir)
+
+    parser = argparse.ArgumentParser(description="Analyze source-to-sink paths with an LLM.")
+    parser.add_argument(
+        "--model-config",
+        default=base_dir / "config" / "model.yaml",
+        help="Path to model YAML with base_url/api_key/model parameters.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default="sink_vuln",
+        help="Model profile name inside model YAML config.",
+    )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Override prompt YAML path. Defaults to prompt_file from selected model profile.",
+    )
+    parser.add_argument(
+        "--sink-paths-dir",
+        default=default_paths,
+        help="Directory with per-source source-to-sink path JSON files.",
+    )
+    parser.add_argument(
+        "--source-analysis-dir",
+        default=None,
+        help="Directory with previous per-source LLM analysis JSON files.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory for per-source vulnerability analysis JSON files.",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Analyze only first N files.")
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=None,
+        help="Override config parallel_workers.",
+    )
+    parser.add_argument(
+        "--max-paths",
+        type=int,
+        default=10,
+        help="Max source-to-sink paths included in one LLM request.",
+    )
+    parser.add_argument(
+        "--max-node-code-chars",
+        type=int,
+        default=1200,
+        help="Max code characters kept per graph node in the LLM payload.",
+    )
+    args = parser.parse_args()
+
+    sink_paths_dir = Path(args.sink_paths_dir)
+    source_analysis_dir = (
+        Path(args.source_analysis_dir)
+        if args.source_analysis_dir is not None
+        else default_source_analysis_dir(sink_paths_dir)
+    )
+    output_dir = Path(args.output) if args.output is not None else default_output_dir(sink_paths_dir)
+
+    model = SinkVulnModel(
+        model_config_path=args.model_config,
+        model_name=args.model_name,
+        prompt_path=args.prompt,
+        source_analysis_dir=source_analysis_dir,
+        max_paths=args.max_paths,
+        max_node_code_chars=args.max_node_code_chars,
+    )
+    model.analyze_dir(
+        sink_paths_dir=sink_paths_dir,
+        output_dir=output_dir,
+        parallel_workers=args.parallel_workers,
+        limit=args.limit,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

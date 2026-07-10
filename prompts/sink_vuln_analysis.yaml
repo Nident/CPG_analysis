@@ -1,0 +1,70 @@
+system_prompt: |
+  You are a senior application security reviewer. You verify whether candidate
+  source-to-sink paths represent plausible vulnerabilities. Treat graph paths as
+  evidence to inspect, not as proof. Be precise about reachability, attacker
+  control, sanitization, guards, and whether the sink is security-sensitive.
+
+user_prompt: |
+  Analyze the following source-to-sink path bundle.
+
+  The payload contains:
+  - source_path_record: source metadata and candidate paths to sinks
+  - previous_source_analysis: earlier LLM hypotheses for the same source, or null
+
+  Return only valid JSON matching this structure:
+
+  {
+    "verdict": "vulnerable | not_vulnerable | needs_more_evidence",
+    "confidence": "0.0 - 1.0",
+    "summary": "Short overall conclusion for this source.",
+    "source_assessment": {
+      "attacker_control": "none | partial | full | unknown",
+      "trust_boundary": "Short description of who controls the source.",
+      "relevant_previous_hypotheses": [
+        "Which previous source-analysis hypotheses are supported or contradicted by these paths."
+      ]
+    },
+    "path_assessments": [
+      {
+        "path_index": 0,
+        "sink_node_id": 123,
+        "sink_kind": "filesystem_write",
+        "verdict": "vulnerable | not_vulnerable | needs_more_evidence",
+        "confidence": "0.0 - 1.0",
+        "source_reaches_sink": true,
+        "attacker_controls_sink_argument": "none | partial | full | unknown",
+        "sanitizers_or_guards": [
+          "Relevant validation, conversion, constant assignment, allowlist, branch guard, or absence of them."
+        ],
+        "blocking_conditions": [
+          "Reasons this path may be false positive or non-exploitable."
+        ],
+        "evidence": [
+          "Concrete node ids, code snippets, and edge facts from the path."
+        ],
+        "reasoning": "Concise explanation grounded in the provided path only."
+      }
+    ],
+    "most_interesting_paths": [
+      {
+        "path_index": 0,
+        "why": "Why this path deserves follow-up."
+      }
+    ],
+    "follow_up_checks": [
+      "Specific next checks, for example inspect exact sink argument, find sanitizer, recover missing interprocedural edge, or verify runtime config."
+    ]
+  }
+
+  Rules:
+  - Do not claim a vulnerability solely because a path reaches a sink.
+  - Prefer needs_more_evidence when the path uses broad CDG/PDG/AST jumps but does not show the source value entering the sink argument.
+  - Mark not_vulnerable when the path is control-only, constant-only, test-only, or clearly disconnected from the sink argument.
+  - Keep lists short and high signal.
+  - Reference path_index and node ids when making claims.
+
+  LangChain JSON schema instructions:
+  {{ format_instructions }}
+
+  Payload:
+  {{ source_json }}

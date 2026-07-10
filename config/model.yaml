@@ -1,9 +1,21 @@
-base_url: "https://api.deepseek.com"
-api_key: 'YOUR_API_KEY'
-model: "deepseek-chat"
-temperature: 0.2
-max_tokens: 450
-timeout: 60
-max_source_chars: 6000
-prompt_file: "../prompts/source_triage.yaml"
-parallel_workers: 1
+api_key: "YOUR API KEY HERE"
+models:
+  source_risk:
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    temperature: 0.2
+    max_tokens: 450
+    timeout: 60
+    max_source_chars: 6000
+    prompt_file: ../prompts/source_triage.yaml
+    parallel_workers: 1
+
+  sink_vuln:
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    temperature: 0.2
+    max_tokens: 2200
+    timeout: 120
+    max_source_chars: 24000
+    prompt_file: ../prompts/sink_vuln_analysis.yaml
+    parallel_workers: 1
