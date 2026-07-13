@@ -1,4 +1,4 @@
-api_key: sk-f932d2a6894c46b7a46855378127040c
+api_key: sk-...
 models:
   source_risk:
     base_url: https://api.deepseek.com

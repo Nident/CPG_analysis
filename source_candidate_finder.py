@@ -465,6 +465,7 @@ def main():
         cpg_payload = json.load(source)
 
     languages = selected_languages(cpg_payload, language, config)
+
     findings = extract(
         cpg_payload,
         languages=languages,

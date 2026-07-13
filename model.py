@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
+import yaml
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -13,6 +13,18 @@ from pydantic import BaseModel
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+
+
+class PromptYamlDumper(yaml.SafeDumper):
+    pass
+
+
+def represent_prompt_string(dumper: yaml.Dumper, value: str) -> yaml.nodes.ScalarNode:
+    style = "|" if "\n" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+PromptYamlDumper.add_representer(str, represent_prompt_string)
 
 
 class ModelClient(Generic[ResponseT]):
@@ -72,7 +84,7 @@ class ModelClient(Generic[ResponseT]):
 
     def save_rendered_prompt(self, source_json: str, path: Path) -> None:
         prompt_value = self.prompt.invoke({"source_json": source_json})
-        messages: list[dict[str, Any]] = []
+        messages: list[dict[str, str]] = []
         for message in prompt_value.to_messages():
             messages.append(
                 {
@@ -82,6 +94,12 @@ class ModelClient(Generic[ResponseT]):
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"messages": messages}, ensure_ascii=False, indent=2) + "\n",
+            yaml.dump(
+                {"messages": messages},
+                Dumper=PromptYamlDumper,
+                allow_unicode=True,
+                sort_keys=False,
+                width=120,
+            ),
             encoding="utf-8",
         )

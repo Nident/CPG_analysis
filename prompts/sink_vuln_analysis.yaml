@@ -10,6 +10,24 @@ user_prompt: |
   The payload contains:
   - source_path_record: source metadata and candidate paths to sinks
   - previous_source_analysis: earlier LLM hypotheses for the same source, or null
+  - expanded_context: optional deterministic CPG expansion after the same source.
+    It may include expansion seeds, downstreamSinkPaths, structuredParseCalls,
+    interestingFieldAccesses, and functionContexts around parsed config objects,
+    CLI config objects, and later sinks.
+  - interprocedural_context: optional synthetic interprocedural expansion. It may
+    include paths with synthetic edges such as SYN_RETURN_TO_CALL_ASSIGN,
+    SYN_CALL_ARG_TO_PARAM, SYN_SAME_NAME_USE, and SYN_ARG_TO_CALL. These edges
+    recover Python value propagation that the raw CPG may omit, such as parsed
+    config returned by one function, assigned at a call site, passed to another
+    function, and then used through config['field'] at a sink.
+    It may also include local_parse_call seeds: parse calls in the same enclosing
+    function after the source, added to recover long source -> parser -> return
+    chains without spending path depth on local file-handle plumbing.
+  - each path.sink.context: enclosing function, namespace/file, call base/receiver,
+    call arguments, incoming data dependencies, incoming control dependencies,
+    and nearby parent statements
+  - each path.evidence: edge counts, path quality, cross-file jumps, and whether
+    the path reaches the actual sink argument or only the sink call/control context
 
   Return only valid JSON matching this structure:
 
@@ -57,10 +75,43 @@ user_prompt: |
   Rules:
   - Return probabilities, not categorical verdicts.
   - vulnerability_probability must be a number from 0.0 to 1.0.
-  - Low probability means the evidence points to false positive, control-only flow, constant-only flow, test-only code, or disconnected sink argument.
-  - Medium probability means source/sink reachability is plausible but attacker control, sink argument influence, or sanitizer evidence is incomplete.
-  - High probability means the provided path shows attacker-controlled data plausibly reaching a dangerous sink argument without adequate guards.
+  - Treat path.evidence.pathQuality as the main reliability signal:
+    dataflow_to_sink_argument is strong evidence; dataflow_to_sink_call is weaker;
+    mixed needs argument-level confirmation; control_only and structural_only are
+    weak evidence and should usually keep probability low.
+  - Low probability means the evidence points to false positive, control-only flow,
+    structural-only flow, constant-only flow, test/tool-only code, cross-file graph
+    jumps, or disconnected sink argument.
+  - Medium probability means source/sink reachability is plausible but attacker
+    control, exact sink argument influence, caller context, or sanitizer evidence
+    is incomplete.
+  - High probability means the provided path and sink.context show attacker-controlled
+    data plausibly reaching the dangerous sink argument without adequate guards.
   - Do not assign high probability solely because a path reaches a sink.
+  - For every path, inspect sink.context.arguments and explain whether the dangerous
+    argument itself is controlled, constant, derived from another variable, or unknown.
+  - Use expanded_context to look beyond first-order sinks such as json.load,
+    json.loads, yaml.safe_load, argparse, and common_config.parse. If parsed data
+    later reaches file writes, chmod/chown, subprocess, template rendering, archive
+    extraction, or other dangerous sinks, raise probability accordingly.
+  - If expanded_context contains downstreamSinkPaths from config fields such as
+    config['command'], config['config_files'], source, dest, owner, perm, conf.*,
+    args.*, or self.* attributes, reason about that propagation explicitly.
+  - Use interprocedural_context to verify cross-function chains. Give more weight
+    to a path when it connects parse/read output to a caller variable, then to a
+    callee parameter, then to a field/subscript used as a dangerous sink argument.
+  - Synthetic edges are hypotheses, not proof. Increase probability when the chain
+    is coherent and supported by function contexts; keep probability lower when it
+    relies only on same-name matching without call/return/parameter support.
+  - For Kolla config-like flows, explicitly inspect chains resembling:
+    json.load/json.loads -> return config -> config = load_config() ->
+    copy_config(config)/handle_permissions(config) -> config['command'],
+    config['config_files'], source, dest, owner, perm -> write/copy/chmod/chown.
+  - If expanded_context is null or lacks downstream dataflow, say which missing
+    expansion would be needed instead of treating parse/read alone as a confirmed bug.
+  - Use sink.context.enclosingFunction and parentStatements to distinguish intended
+    CLI/tool behavior, fixed constants, config-driven behavior, and actual unsafe use.
+  - Mention crossArtifactJumpCount when cross-file jumps make the path suspicious.
   - Keep lists short and high signal.
   - Reference path_index and node ids when making claims.
 

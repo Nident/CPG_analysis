@@ -312,7 +312,7 @@ def result_filename(record: SourceResultRecord) -> str:
 def prompt_filename(source: CandidateSource, index: int) -> str:
     node = source.get("nodeId")
     node_part = f"node_{node}" if node is not None else "node_unknown"
-    return f"{index:06d}_{node_part}_prompt.json"
+    return f"{index:06d}_{node_part}_prompt.yaml"
 
 
 def write_pretty_json(path: Path, data: SourceResultRecord) -> None:

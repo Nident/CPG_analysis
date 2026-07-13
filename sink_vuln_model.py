@@ -76,6 +76,8 @@ class AnalysisRecord(TypedDict):
     sourceNodeId: int | None
     inputFile: str
     previousSourceAnalysisFile: str | None
+    contextExpansionFile: str | None
+    interproceduralContextFile: str | None
     analysis: dict[str, Any]
 
 
@@ -84,6 +86,8 @@ class ErrorRecord(TypedDict):
     sourceNodeId: int | None
     inputFile: str
     previousSourceAnalysisFile: str | None
+    contextExpansionFile: str | None
+    interproceduralContextFile: str | None
     error: dict[str, str]
 
 
@@ -155,6 +159,8 @@ class SinkVulnModel:
         model_name: str,
         prompt_path: str | Path | None,
         source_analysis_dir: str | Path | None,
+        context_expansion_dir: str | Path | None,
+        interprocedural_context_dir: str | Path | None,
         max_paths: int,
         max_node_code_chars: int,
     ) -> None:
@@ -168,6 +174,12 @@ class SinkVulnModel:
         self.prompt_config = PromptConfig.from_yaml(resolved_prompt_path)
         self.source_analysis_index = load_source_analysis_index(
             Path(source_analysis_dir) if source_analysis_dir is not None else None
+        )
+        self.context_expansion_index = load_context_expansion_index(
+            Path(context_expansion_dir) if context_expansion_dir is not None else None
+        )
+        self.interprocedural_context_index = load_interprocedural_context_index(
+            Path(interprocedural_context_dir) if interprocedural_context_dir is not None else None
         )
         self.max_paths = max_paths
         self.max_node_code_chars = max_node_code_chars
@@ -192,6 +204,20 @@ class SinkVulnModel:
             else None
         )
         previous_analysis = previous_entry.data if previous_entry is not None else None
+        context_entry = (
+            self.context_expansion_index.get(source_node_id)
+            if source_node_id is not None
+            else None
+        )
+        expanded_context = context_entry.data if context_entry is not None else None
+        interprocedural_entry = (
+            self.interprocedural_context_index.get(source_node_id)
+            if source_node_id is not None
+            else None
+        )
+        interprocedural_context = (
+            interprocedural_entry.data if interprocedural_entry is not None else None
+        )
         payload = {
             "source_path_record": compact_path_record(
                 path_record,
@@ -199,6 +225,14 @@ class SinkVulnModel:
                 max_node_code_chars=self.max_node_code_chars,
             ),
             "previous_source_analysis": previous_analysis,
+            "expanded_context": compact_context_record(
+                expanded_context,
+                max_node_code_chars=self.max_node_code_chars,
+            ),
+            "interprocedural_context": compact_context_record(
+                interprocedural_context,
+                max_node_code_chars=self.max_node_code_chars,
+            ),
         }
         payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
         analysis = self.model_client.request(payload_json, prompt_output_path=prompt_output_path)
@@ -208,6 +242,12 @@ class SinkVulnModel:
             "inputFile": str(path_file),
             "previousSourceAnalysisFile": (
                 str(previous_entry.path) if previous_entry is not None else None
+            ),
+            "contextExpansionFile": (
+                str(context_entry.path) if context_entry is not None else None
+            ),
+            "interproceduralContextFile": (
+                str(interprocedural_entry.path) if interprocedural_entry is not None else None
             ),
             "analysis": analysis.model_dump(),
         }
@@ -255,12 +295,28 @@ class SinkVulnModel:
                         if source_node_id is not None
                         else None
                     )
+                    context_entry = (
+                        self.context_expansion_index.get(source_node_id)
+                        if source_node_id is not None
+                        else None
+                    )
+                    interprocedural_entry = (
+                        self.interprocedural_context_index.get(source_node_id)
+                        if source_node_id is not None
+                        else None
+                    )
                     record = {
                         "status": "error",
                         "sourceNodeId": source_node_id,
                         "inputFile": str(input_file),
                         "previousSourceAnalysisFile": (
                             str(previous_entry.path) if previous_entry is not None else None
+                        ),
+                        "contextExpansionFile": (
+                            str(context_entry.path) if context_entry is not None else None
+                        ),
+                        "interproceduralContextFile": (
+                            str(interprocedural_entry.path) if interprocedural_entry is not None else None
                         ),
                         "error": {
                             "type": type(error).__name__,
@@ -292,6 +348,10 @@ class SinkVulnModel:
                 "sinkPathsDir": str(input_dir),
                 "outputDir": str(output),
                 "sourceAnalysisDir": source_analysis_dir_string(self.source_analysis_index),
+                "contextExpansionDir": context_expansion_dir_string(self.context_expansion_index),
+                "interproceduralContextDir": interprocedural_context_dir_string(
+                    self.interprocedural_context_index
+                ),
                 "fileCount": len(files),
                 "parallelWorkers": workers,
                 "maxPaths": self.max_paths,
@@ -303,6 +363,18 @@ class SinkVulnModel:
 
 @dataclass(frozen=True)
 class SourceAnalysisEntry:
+    path: Path
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ContextExpansionEntry:
+    path: Path
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class InterproceduralContextEntry:
     path: Path
     data: dict[str, Any]
 
@@ -328,6 +400,15 @@ def compact_path_record(
         compacted["paths"] = paths[:max_paths]
         compacted["omittedPathCount"] = max(0, len(paths) - max_paths)
     return compacted
+
+
+def compact_context_record(
+    data: dict[str, Any] | None,
+    max_node_code_chars: int,
+) -> dict[str, Any] | None:
+    if data is None:
+        return None
+    return deep_compact(data, max_node_code_chars)
 
 
 def deep_compact(value: Any, max_node_code_chars: int) -> Any:
@@ -366,7 +447,53 @@ def load_source_analysis_index(source_analysis_dir: Path | None) -> dict[int, So
     return index
 
 
+def load_context_expansion_index(context_expansion_dir: Path | None) -> dict[int, ContextExpansionEntry]:
+    if context_expansion_dir is None or not context_expansion_dir.exists():
+        return {}
+    if not context_expansion_dir.is_dir():
+        raise ValueError(f"{context_expansion_dir}: context expansion path must be a directory")
+
+    index: dict[int, ContextExpansionEntry] = {}
+    for path in sorted(context_expansion_dir.glob("*_context_ok.json")):
+        data = load_json_object(path)
+        node_id = optional_int(data.get("sourceNodeId"))
+        if node_id is not None:
+            index[node_id] = ContextExpansionEntry(path, data)
+    return index
+
+
+def load_interprocedural_context_index(
+    interprocedural_context_dir: Path | None,
+) -> dict[int, InterproceduralContextEntry]:
+    if interprocedural_context_dir is None or not interprocedural_context_dir.exists():
+        return {}
+    if not interprocedural_context_dir.is_dir():
+        raise ValueError(f"{interprocedural_context_dir}: interprocedural context path must be a directory")
+
+    index: dict[int, InterproceduralContextEntry] = {}
+    for path in sorted(interprocedural_context_dir.glob("*_interprocedural_ok.json")):
+        data = load_json_object(path)
+        node_id = optional_int(data.get("sourceNodeId"))
+        if node_id is not None:
+            index[node_id] = InterproceduralContextEntry(path, data)
+    return index
+
+
 def source_analysis_dir_string(index: dict[int, SourceAnalysisEntry]) -> str | None:
+    if not index:
+        return None
+    first = next(iter(index.values()))
+    return str(first.path.parent)
+
+
+def context_expansion_dir_string(index: dict[int, ContextExpansionEntry]) -> str | None:
+    if not index:
+        return None
+    first = next(iter(index.values()))
+    return str(first.path.parent)
+
+
+def interprocedural_context_dir_string(index: dict[int, InterproceduralContextEntry]) -> str | None:
     if not index:
         return None
     first = next(iter(index.values()))
@@ -393,7 +520,7 @@ def prompt_filename(input_file: Path) -> str:
         name = name.removesuffix("_ok.json")
     else:
         name = input_file.stem
-    return f"{name}_prompt.json"
+    return f"{name}_prompt.yaml"
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -474,6 +601,22 @@ def default_source_analysis_dir(sink_paths_dir: Path) -> Path:
     return sink_paths_dir.parent / "source_model_analysis"
 
 
+def default_context_expansion_dir(sink_paths_dir: Path) -> Path | None:
+    name = sink_paths_dir.name
+    if name.endswith("_sink_paths"):
+        path = sink_paths_dir.parent / f"{name.removesuffix('_sink_paths')}_context_expansion"
+        return path if path.exists() else None
+    return None
+
+
+def default_interprocedural_context_dir(sink_paths_dir: Path) -> Path | None:
+    name = sink_paths_dir.name
+    if name.endswith("_sink_paths"):
+        path = sink_paths_dir.parent / f"{name.removesuffix('_sink_paths')}_interprocedural_context"
+        return path if path.exists() else None
+    return None
+
+
 def default_output_dir(sink_paths_dir: Path) -> Path:
     name = sink_paths_dir.name
     if name.endswith("_sink_paths"):
@@ -493,6 +636,12 @@ def main() -> int:
     source_analysis_dir = env_optional_path("SINK_VULN_SOURCE_ANALYSIS_DIR")
     if source_analysis_dir is None:
         source_analysis_dir = default_source_analysis_dir(sink_paths_dir)
+    context_expansion_dir = env_optional_path("SINK_VULN_CONTEXT_EXPANSION_DIR")
+    if context_expansion_dir is None:
+        context_expansion_dir = default_context_expansion_dir(sink_paths_dir)
+    interprocedural_context_dir = env_optional_path("SINK_VULN_INTERPROCEDURAL_CONTEXT_DIR")
+    if interprocedural_context_dir is None:
+        interprocedural_context_dir = default_interprocedural_context_dir(sink_paths_dir)
     output_dir = env_optional_path("SINK_VULN_OUTPUT")
     if output_dir is None:
         output_dir = default_output_dir(sink_paths_dir)
@@ -502,6 +651,8 @@ def main() -> int:
         model_name=env_str("SINK_VULN_MODEL_NAME"),
         prompt_path=env_optional_path("SINK_VULN_PROMPT"),
         source_analysis_dir=source_analysis_dir,
+        context_expansion_dir=context_expansion_dir,
+        interprocedural_context_dir=interprocedural_context_dir,
         max_paths=env_int("SINK_VULN_MAX_PATHS"),
         max_node_code_chars=env_int("SINK_VULN_MAX_NODE_CODE_CHARS"),
     )

@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +41,13 @@ STRUCTURAL_TRAVERSAL_EDGES: set[str] = {
 
 TraversalDirection = Literal["forward", "reverse", "synthetic"]
 SinkSeverity = Literal["low", "medium", "high"]
+PathQuality = Literal[
+    "dataflow_to_sink_argument",
+    "dataflow_to_sink_call",
+    "mixed",
+    "control_only",
+    "structural_only",
+]
 
 
 class CandidateSource(TypedDict, total=False):
@@ -86,6 +93,24 @@ class PathStep(TypedDict):
     node: NodeSummary
 
 
+class SinkArgument(TypedDict):
+    index: int | None
+    role: str
+    node: NodeSummary
+    incomingDataDependencies: list[NodeSummary]
+
+
+class SinkContext(TypedDict):
+    enclosingFunction: NodeSummary | None
+    enclosingNamespace: NodeSummary | None
+    base: NodeSummary | None
+    receiver: NodeSummary | None
+    arguments: list[SinkArgument]
+    incomingDataDependencies: list[NodeSummary]
+    incomingControlDependencies: list[NodeSummary]
+    parentStatements: list[NodeSummary]
+
+
 class SinkRecord(TypedDict):
     nodeId: int
     kind: str
@@ -93,11 +118,26 @@ class SinkRecord(TypedDict):
     severity: SinkSeverity
     evidence: str
     node: NodeSummary
+    context: SinkContext
+
+
+class PathEvidence(TypedDict):
+    pathQuality: PathQuality
+    edgeTypeCounts: dict[str, int]
+    edgeDirectionCounts: dict[str, int]
+    hasDirectDataflowToSinkArgument: bool
+    hasDirectDataflowToSinkCall: bool
+    hasControlOnlyFlow: bool
+    structuralStepCount: int
+    crossArtifactJumpCount: int
+    sinkArgumentNodeIdsInPath: list[int]
+    sinkDataDependencyNodeIdsInPath: list[int]
 
 
 class SinkPathRecord(TypedDict):
     sink: SinkRecord
     pathLength: int
+    evidence: PathEvidence
     path: list[PathStep]
 
 
@@ -144,6 +184,8 @@ class CPGGraph:
         self.nodes = nodes
         self.edges = edges
         self.nodes_by_id = {require_int(node["id"], "node.id"): node for node in nodes}
+        self.outgoing_edges = self._group_edges(edges, "startNode")
+        self.incoming_edges = self._group_edges(edges, "endNode")
         self.adjacency = self._build_adjacency(edges)
 
     @classmethod
@@ -156,6 +198,13 @@ class CPGGraph:
         if not isinstance(nodes, list) or not isinstance(edges, list):
             raise TypeError(f"{path}: nodes and edges must be lists")
         return cls(cast(list[dict[str, Any]], nodes), cast(list[dict[str, Any]], edges))
+
+    def _group_edges(self, edges: list[dict[str, Any]], endpoint: str) -> dict[int, list[dict[str, Any]]]:
+        grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for edge in edges:
+            node_id = require_int(edge[endpoint], f"edge.{endpoint}")
+            grouped[node_id].append(edge)
+        return grouped
 
     def _build_adjacency(self, edges: list[dict[str, Any]]) -> dict[int, list[TraversalEdge]]:
         adjacency: dict[int, list[TraversalEdge]] = defaultdict(list)
@@ -172,7 +221,7 @@ class CPGGraph:
                 adjacency[end].append(TraversalEdge(start, edge_type, "reverse"))
         return adjacency
 
-    def node_summary(self, node_id: int) -> NodeSummary:
+    def node_summary(self, node_id: int, max_code_chars: int | None = None) -> NodeSummary:
         node = self.nodes_by_id[node_id]
         properties = node.get("properties", {})
         if not isinstance(properties, dict):
@@ -188,8 +237,132 @@ class CPGGraph:
             "endLine": optional_int(properties.get("endLine")),
             "name": optional_str(properties.get("name")),
             "fullName": optional_str(properties.get("fullName")),
-            "code": optional_str(properties.get("code")),
+            "code": limit_text(optional_str(properties.get("code")), max_code_chars),
         }
+
+    def outgoing_by_type(self, node_id: int, edge_type: str) -> list[dict[str, Any]]:
+        return [edge for edge in self.outgoing_edges.get(node_id, []) if edge.get("type") == edge_type]
+
+    def incoming_by_type(self, node_id: int, edge_type: str) -> list[dict[str, Any]]:
+        return [edge for edge in self.incoming_edges.get(node_id, []) if edge.get("type") == edge_type]
+
+    def ast_children(self, node_id: int) -> list[int]:
+        return sorted_child_ids(self.outgoing_by_type(node_id, "AST"))
+
+    def ast_parent(self, node_id: int) -> int | None:
+        edges = self.incoming_by_type(node_id, "AST")
+        if not edges:
+            return None
+        return require_int(edges[0]["startNode"], "edge.startNode")
+
+    def ancestors(self, node_id: int, max_depth: int) -> list[int]:
+        ancestors: list[int] = []
+        current = node_id
+        seen: set[int] = set()
+        for _ in range(max_depth):
+            parent = self.ast_parent(current)
+            if parent is None or parent in seen:
+                break
+            seen.add(parent)
+            ancestors.append(parent)
+            current = parent
+        return ancestors
+
+    def enclosing_with_label(
+        self,
+        node_id: int,
+        labels: set[str],
+        max_depth: int = 30,
+        max_code_chars: int | None = None,
+    ) -> NodeSummary | None:
+        for ancestor_id in self.ancestors(node_id, max_depth):
+            node_labels = self.node_labels(ancestor_id)
+            if labels & node_labels:
+                return self.node_summary(ancestor_id, max_code_chars=max_code_chars)
+        return None
+
+    def node_labels(self, node_id: int) -> set[str]:
+        labels = self.nodes_by_id[node_id].get("labels", [])
+        if not isinstance(labels, list):
+            raise TypeError(f"node {node_id}: labels must be a list")
+        return set(cast(list[str], labels))
+
+    def sink_context(self, sink_node_id: int) -> SinkContext:
+        return {
+            "enclosingFunction": self.enclosing_with_label(
+                sink_node_id,
+                {"Function", "Method"},
+                max_code_chars=5000,
+            ),
+            "enclosingNamespace": self.enclosing_with_label(
+                sink_node_id,
+                {"Namespace", "TranslationUnit"},
+                max_code_chars=1200,
+            ),
+            "base": first_node_summary(self, sink_node_id, ("BASE", "OPERATOR_BASE")),
+            "receiver": first_node_summary(self, sink_node_id, ("RECEIVER",)),
+            "arguments": self.sink_arguments(sink_node_id),
+            "incomingDataDependencies": self.incoming_dependency_nodes(sink_node_id, {"DFG", "PDG"}, "DATA"),
+            "incomingControlDependencies": self.incoming_dependency_nodes(sink_node_id, {"CDG", "PDG"}, "CONTROL"),
+            "parentStatements": self.parent_statements(sink_node_id, max_items=5),
+        }
+
+    def sink_arguments(self, sink_node_id: int) -> list[SinkArgument]:
+        argument_edges = self.outgoing_by_type(sink_node_id, "ARGUMENTS")
+        if not argument_edges:
+            argument_edges = self.outgoing_by_type(sink_node_id, "OPERATOR_ARGUMENTS")
+        arguments: list[SinkArgument] = []
+        seen: set[int] = set()
+        for edge in sorted_edges_by_index(argument_edges):
+            node_id = require_int(edge["endNode"], "edge.endNode")
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            arguments.append(
+                {
+                    "index": edge_index(edge),
+                    "role": argument_role(edge_index(edge)),
+                    "node": self.node_summary(node_id, max_code_chars=1000),
+                    "incomingDataDependencies": self.incoming_dependency_nodes(
+                        node_id,
+                        {"DFG", "PDG"},
+                        "DATA",
+                    ),
+                }
+            )
+        return arguments
+
+    def incoming_dependency_nodes(
+        self,
+        node_id: int,
+        edge_types: set[str],
+        dependence: str | None,
+    ) -> list[NodeSummary]:
+        summaries: list[NodeSummary] = []
+        seen: set[int] = set()
+        for edge in self.incoming_edges.get(node_id, []):
+            if edge.get("type") not in edge_types:
+                continue
+            properties = edge.get("properties", {})
+            if dependence is not None and isinstance(properties, dict):
+                if properties.get("dependence") != dependence:
+                    continue
+            start_id = require_int(edge["startNode"], "edge.startNode")
+            if start_id in seen or start_id not in self.nodes_by_id:
+                continue
+            seen.add(start_id)
+            summaries.append(self.node_summary(start_id, max_code_chars=1000))
+        return summaries[:10]
+
+    def parent_statements(self, node_id: int, max_items: int) -> list[NodeSummary]:
+        statements: list[NodeSummary] = []
+        for ancestor_id in self.ancestors(node_id, 12):
+            labels = self.node_labels(ancestor_id)
+            if labels & {"Assign", "Return", "IfStatement", "ForStatement", "WhileStatement", "Block", "Function"}:
+                statements.append(self.node_summary(ancestor_id, max_code_chars=2000))
+            if len(statements) >= max_items:
+                break
+        return statements
 
     def find_sink_candidates(self) -> list[SinkCandidate]:
         sinks: list[SinkCandidate] = []
@@ -264,6 +437,22 @@ class SinkPathFinder:
                 },
             ]
 
+        def add_seed_after(
+            previous_node_id: int,
+            node_id: int,
+            role: str,
+            edge_type: str,
+        ) -> None:
+            if node_id in paths or previous_node_id not in paths:
+                return
+            paths[node_id] = paths[previous_node_id] + [
+                {
+                    "role": role,
+                    "edgeFromPrevious": {"type": edge_type, "direction": "synthetic"},
+                    "node": self.graph.node_summary(node_id),
+                }
+            ]
+
         assigned = source.get("assignedTo")
         if isinstance(assigned, dict) and isinstance(assigned.get("nodeId"), int):
             add_seed(assigned["nodeId"], "assigned_to", "SOURCE_ASSIGNED_TO")
@@ -275,17 +464,26 @@ class SinkPathFinder:
         for related_use in source.get("relatedUses", []):
             if not isinstance(related_use, dict):
                 continue
+            related_use_id = related_use.get("nodeId")
             if isinstance(related_use.get("nodeId"), int):
                 add_seed(related_use["nodeId"], "related_use", "SOURCE_RELATED_USE")
             parents = related_use.get("parents", [])
             if isinstance(parents, list):
                 for parent in parents:
                     if isinstance(parent, dict) and isinstance(parent.get("nodeId"), int):
-                        add_seed(
-                            parent["nodeId"],
-                            "related_use_parent",
-                            f"SOURCE_RELATED_USE_PARENT:{parent.get('relation', 'UNKNOWN')}",
-                        )
+                        if isinstance(related_use_id, int):
+                            add_seed_after(
+                                related_use_id,
+                                parent["nodeId"],
+                                "related_use_parent",
+                                f"SOURCE_RELATED_USE_PARENT:{parent.get('relation', 'UNKNOWN')}",
+                            )
+                        else:
+                            add_seed(
+                                parent["nodeId"],
+                                "related_use_parent",
+                                f"SOURCE_RELATED_USE_PARENT:{parent.get('relation', 'UNKNOWN')}",
+                            )
 
         return list(paths.values())
 
@@ -309,6 +507,7 @@ class SinkPathFinder:
                     {
                         "sink": sink_record(self.graph, sink),
                         "pathLength": len(path),
+                        "evidence": path_evidence(self.graph, path, sink.node_id),
                         "path": path,
                     }
                 )
@@ -342,6 +541,78 @@ class SinkPathFinder:
                 )
 
         return results
+
+
+def path_evidence(graph: CPGGraph, path: list[PathStep], sink_node_id: int) -> PathEvidence:
+    edge_types: Counter[str] = Counter()
+    edge_directions: Counter[str] = Counter()
+    for step in path[1:]:
+        edge = step["edgeFromPrevious"]
+        if edge is None:
+            continue
+        edge_types[edge["type"]] += 1
+        edge_directions[f"{edge['direction']}:{edge['type']}"] += 1
+
+    path_node_ids = {step["node"]["nodeId"] for step in path}
+    sink_argument_ids = {arg["node"]["nodeId"] for arg in graph.sink_arguments(sink_node_id)}
+    sink_data_dependency_ids = {
+        node["nodeId"]
+        for node in graph.incoming_dependency_nodes(sink_node_id, {"DFG", "PDG"}, "DATA")
+    }
+    argument_ids_in_path = sorted(path_node_ids & sink_argument_ids)
+    data_dependency_ids_in_path = sorted(path_node_ids & sink_data_dependency_ids)
+    has_source_summary_edge = any(edge_type.startswith("SOURCE_") for edge_type in edge_types)
+    has_direct_dataflow_to_sink_argument = bool(argument_ids_in_path) and (
+        edge_types["DFG"] > 0 or has_source_summary_edge
+    )
+    has_direct_dataflow_to_sink_call = bool(data_dependency_ids_in_path) and (
+        edge_types["DFG"] > 0 or has_source_summary_edge
+    )
+
+    return {
+        "pathQuality": classify_path_quality(
+            edge_types,
+            has_direct_dataflow_to_sink_argument,
+            has_direct_dataflow_to_sink_call,
+        ),
+        "edgeTypeCounts": dict(sorted(edge_types.items())),
+        "edgeDirectionCounts": dict(sorted(edge_directions.items())),
+        "hasDirectDataflowToSinkArgument": has_direct_dataflow_to_sink_argument,
+        "hasDirectDataflowToSinkCall": has_direct_dataflow_to_sink_call,
+        "hasControlOnlyFlow": edge_types["CDG"] > 0 and edge_types["DFG"] == 0,
+        "structuralStepCount": sum(edge_types[edge_type] for edge_type in STRUCTURAL_TRAVERSAL_EDGES),
+        "crossArtifactJumpCount": cross_artifact_jump_count(path),
+        "sinkArgumentNodeIdsInPath": argument_ids_in_path,
+        "sinkDataDependencyNodeIdsInPath": data_dependency_ids_in_path,
+    }
+
+
+def classify_path_quality(
+    edge_types: Counter[str],
+    has_direct_dataflow_to_sink_argument: bool,
+    has_direct_dataflow_to_sink_call: bool,
+) -> PathQuality:
+    if has_direct_dataflow_to_sink_argument:
+        return "dataflow_to_sink_argument"
+    if has_direct_dataflow_to_sink_call:
+        return "dataflow_to_sink_call"
+    if edge_types["DFG"] > 0 or edge_types["PDG"] > 0:
+        return "mixed"
+    if edge_types["CDG"] > 0:
+        return "control_only"
+    return "structural_only"
+
+
+def cross_artifact_jump_count(path: list[PathStep]) -> int:
+    jumps = 0
+    previous_artifact: str | None = None
+    for step in path:
+        artifact = step["node"]["artifact"]
+        if artifact is not None and previous_artifact is not None and artifact != previous_artifact:
+            jumps += 1
+        if artifact is not None:
+            previous_artifact = artifact
+    return jumps
 
 
 def classify_sink(node: dict[str, Any]) -> list[SinkCandidate]:
@@ -406,7 +677,47 @@ def sink_record(graph: CPGGraph, sink: SinkCandidate) -> SinkRecord:
         "severity": sink.severity,
         "evidence": sink.evidence,
         "node": graph.node_summary(sink.node_id),
+        "context": graph.sink_context(sink.node_id),
     }
+
+
+def sorted_child_ids(edges: list[dict[str, Any]]) -> list[int]:
+    return [
+        require_int(edge["endNode"], "edge.endNode")
+        for edge in sorted_edges_by_index(edges)
+    ]
+
+
+def sorted_edges_by_index(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(edges, key=lambda edge: (edge_index(edge) if edge_index(edge) is not None else 10_000))
+
+
+def edge_index(edge: dict[str, Any]) -> int | None:
+    properties = edge.get("properties", {})
+    if not isinstance(properties, dict):
+        return None
+    index = properties.get("index")
+    if isinstance(index, int):
+        return index
+    return None
+
+
+def argument_role(index: int | None) -> str:
+    if index is None:
+        return "unknown"
+    if index == 0:
+        return "arg0"
+    return f"arg{index}"
+
+
+def first_node_summary(graph: CPGGraph, node_id: int, edge_types: tuple[str, ...]) -> NodeSummary | None:
+    for edge_type in edge_types:
+        edges = graph.outgoing_by_type(node_id, edge_type)
+        if not edges:
+            continue
+        end_node = require_int(sorted_edges_by_index(edges)[0]["endNode"], "edge.endNode")
+        return graph.node_summary(end_node)
+    return None
 
 
 def load_candidate_sources(path: Path) -> list[CandidateSource]:
@@ -550,6 +861,12 @@ def optional_str(value: Any) -> str | None:
     if not isinstance(value, str):
         return str(value)
     return value
+
+
+def limit_text(value: str | None, max_chars: int | None) -> str | None:
+    if value is None or max_chars is None or len(value) <= max_chars:
+        return value
+    return value[:max_chars] + "\n...<truncated>"
 
 
 def main() -> int:
