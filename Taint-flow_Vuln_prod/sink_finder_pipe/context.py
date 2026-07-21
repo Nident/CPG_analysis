@@ -323,3 +323,13 @@ class ContextExpander:
             edge = step["edgeFromPrevious"]
             counter[edge["type"]] += 1
         return dict(sorted(counter.items()))
+
+
+def main() -> int:
+    summary = ContextExpansionPipeline(Path(__file__).resolve().parents[1]).run()
+    print(f"context expanded: sources={summary['sourceCount']} output={summary['outputDir']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -476,3 +476,13 @@ class FunctionIndex:
     def node_sort_key(self, node_id: int) -> tuple[str, int, int]:
         node = self.graph.node_summary(node_id)
         return (node["artifact"] or "", node["startLine"] if node["startLine"] is not None else 10**9, node_id)
+
+
+def main() -> int:
+    summary = InterproceduralContextPipeline(Path(__file__).resolve().parents[1]).run()
+    print(f"interprocedural context: sources={summary['sourceCount']} output={summary['outputDir']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

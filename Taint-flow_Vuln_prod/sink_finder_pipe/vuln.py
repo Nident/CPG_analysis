@@ -335,3 +335,13 @@ class SinkVulnPipeline:
         if not isinstance(value, int | float):
             raise TypeError(f"{name} must be numeric")
         return float(value)
+
+
+def main() -> int:
+    summary = SinkVulnPipeline(Path(__file__).resolve().parents[1]).run()
+    print(f"sink vuln analyzed: files={summary['fileCount']} output={summary['outputDir']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

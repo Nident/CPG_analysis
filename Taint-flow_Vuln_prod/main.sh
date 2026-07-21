@@ -32,7 +32,11 @@ run_step() {
   printf '    env: %s\n' "${env_file}"
   (
     cd "${ROOT_DIR}"
-    env "${env_var_name}=${env_file}" "${PYTHON_BIN}" "${module}"
+    if [[ "${module}" == *.py ]]; then
+      env "${env_var_name}=${env_file}" "${PYTHON_BIN}" "${module}"
+    else
+      env "${env_var_name}=${env_file}" "${PYTHON_BIN}" -m "${module}"
+    fi
   )
 }
 
@@ -66,20 +70,20 @@ run_step \
   "Expand deterministic context" \
   "CONTEXT_EXPANDER_ENV_FILE" \
   "${CONTEXT_EXPANDER_ENV_FILE:-${ROOT_DIR}/config/context_expander.env}" \
-  "context_expander.py"
+  "sink_finder_pipe.context"
 
 run_step \
   "${RUN_INTERPROCEDURAL_CONTEXT}" \
   "Build interprocedural context" \
   "INTERPROCEDURAL_CONTEXT_ENV_FILE" \
   "${INTERPROCEDURAL_CONTEXT_ENV_FILE:-${ROOT_DIR}/config/interprocedural_context.env}" \
-  "interprocedural_context.py"
+  "sink_finder_pipe.interprocedural"
 
 run_step \
   "${RUN_SINK_VULN}" \
   "Analyze source-to-sink vulnerabilities with LLM" \
   "SINK_VULN_ENV_FILE" \
   "${SINK_VULN_ENV_FILE:-${ROOT_DIR}/config/sink_vuln_model.env}" \
-  "sink_vuln_model.py"
+  "sink_finder_pipe.vuln"
 
 printf '\nPipeline finished successfully.\n'
