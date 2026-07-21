@@ -1,0 +1,129 @@
+---
+version: 1
+description: Semantic path/object-key context. Covers local path traversal, unsafe file operations, archive paths, and object-store key misuse.
+
+context_kind: path_object
+
+sink_kinds:
+  - filesystem_read
+  - filesystem_write
+  - filesystem_mutation
+  - archive_operation
+
+limits:
+  max_paths: 12
+  max_groups: 8
+  max_external_contexts: 0
+  max_signal_matches: 12
+  max_code_chars: 2200
+
+path_quality_fields:
+  - pathQuality
+  - hasDataflow
+  - hasControlOnlyFlow
+  - hasDirectDataflowToSinkArgument
+  - crossArtifactJumpCount
+  - hasSyntheticEdges
+  - edgeTypeCounts
+
+dangerous_argument_roles:
+  - receiver_or_self
+  - first_argument
+  - second_argument
+
+signals:
+  path_construction:
+    - id: local-path-construction
+      description: Local filesystem path or file object is constructed.
+      contains_any:
+        - ".resolve("
+        - "Paths.get("
+        - "new File("
+        - ".toFile("
+        - "getPath("
+        - "Files."
+    - id: object-key-construction
+      description: Object-store container/key/blob identifier is constructed or used.
+      contains_any:
+        - "containerName"
+        - "blobName"
+        - "blobStore."
+        - "getBlob"
+        - "putBlob"
+        - "removeBlob"
+
+  attacker_input:
+    - id: http-uri-path
+      description: HTTP URI/path input may influence path or object-key selection.
+      contains_any:
+        - "getRequestURI"
+        - "getPath()"
+        - "path["
+    - id: request-parameter
+      description: HTTP request parameter may influence a path-like argument.
+      contains_any:
+        - "getParameter"
+        - "uploadId"
+        - "prefix"
+        - "marker"
+        - "delimiter"
+    - id: config-or-cli-path
+      description: CLI/config/environment input may influence path selection.
+      contains_any:
+        - "args"
+        - "System.getProperty"
+        - "System.getenv"
+
+  guard_indicators:
+    - id: canonical-base-check
+      description: Canonical/normalized path is checked against an allowed base.
+      contains_any:
+        - "normalize()"
+        - "toRealPath("
+        - "getCanonicalPath("
+        - "startsWith("
+    - id: traversal-token-reject
+      description: Traversal tokens or absolute paths are explicitly rejected.
+      contains_any:
+        - "\"..\""
+        - "contains(\"..\")"
+        - "isAbsolute("
+    - id: object-policy-check
+      description: Object operation appears protected by storage policy/auth/existence checks.
+      contains_any:
+        - "hasAccess"
+        - "authorize"
+        - "blobExists"
+        - "containerExists"
+
+  risk_indicators:
+    - id: traversal-token
+      description: Context contains path traversal token handling.
+      contains_any:
+        - "../"
+        - "..\\"
+        - "\"..\""
+    - id: unguarded-mutation
+      description: Path/object identifier reaches deletion or mutation.
+      contains_any:
+        - "removeBlob"
+        - "removeBlobs"
+        - "deleteBlob"
+        - "delete("
+        - "remove("
+
+  blocking_hints:
+    - id: object-store-not-local-filesystem
+      description: Sink appears to operate on object/blob storage rather than local filesystem paths.
+      contains_any:
+        - "blobStore."
+        - "removeBlob"
+        - "removeBlobs"
+        - "containerName"
+        - "blobName"
+    - id: response-only
+      description: Sink appears to write an HTTP/XML response rather than local filesystem.
+      contains_any:
+        - "XMLStreamWriter"
+        - "writeSimpleElement"
+        - "writeCharacters"

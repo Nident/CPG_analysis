@@ -8,7 +8,7 @@ inputs:
   context_expansion_glob: "*_context_ok.json"
   interprocedural_context_glob: "*_interprocedural_ok.json"
   xml_context_file: contexts.json
-  xml_context_rules: rules/xml_parser_context.yml
+  semantic_contexts: rules/semantic_contexts.yml
 
 payload:
   max_paths: 10
@@ -18,7 +18,7 @@ payload:
     - previous_source_analysis
     - expanded_context
     - interprocedural_context
-    - xml_parser_context
+    - semantic_contexts
 
 output:
   save_prompts: true
@@ -40,13 +40,15 @@ prompt:
     - previous_source_analysis: earlier source-risk hypotheses, or null.
     - expanded_context: deterministic downstream CPG expansion, or null.
     - interprocedural_context: synthetic cross-function propagation context, or null.
-    - xml_parser_context: optional XML parser API context. This is evidence only,
-      never a deterministic verdict.
+    - semantic_contexts: optional sink-family evidence. Context families are not
+      CWE verdicts. Use them to reason about parser, path/object, output encoding,
+      and future security-sensitive zones.
 
     Return only valid JSON matching this structure:
 
     {
       "vulnerability_probability": 0.0,
+      "candidate_cwes": [],
       "summary": "Short overall conclusion for this source.",
       "source_assessment": {
         "attacker_control": "none | partial | full | unknown",
@@ -60,6 +62,7 @@ prompt:
           "path_index": 0,
           "sink_node_id": 123,
           "sink_kind": "filesystem_write",
+          "candidate_cwes": [],
           "vulnerability_probability": 0.0,
           "source_reaches_sink": true,
           "attacker_controls_sink_argument": "none | partial | full | unknown",
@@ -98,9 +101,24 @@ prompt:
       argument is controlled, constant, derived, guarded, or unknown.
     - Use expanded_context and interprocedural_context to support or weaken the
       path evidence, especially for parse/read -> return -> caller -> callee chains.
-    - For xml_parser_security_api, decide whether externally supplied XML is parsed
-      without effective hardening. Missing hardening matters, but xml_parser_context
-      is still only supporting evidence.
+    - Infer CWE classes from evidence. Do not assume a semantic context kind is a CWE.
+      A parser context can imply CWE-611, CWE-502, CWE-20, or no vulnerability.
+      A path_object context can imply CWE-22/CWE-36, object-store misuse,
+      authorization/business-logic issues, or no vulnerability.
+      An output_encoding context can imply CWE-79/CWE-80/CWE-81, XML/HTML
+      injection, safe encoded output, or no vulnerability.
+    - For parser contexts, ask whether attacker-controlled bytes reach a parser or
+      deserializer without effective hardening, schema/type restrictions, or safe
+      loader behavior.
+    - For path/object contexts, distinguish local filesystem traversal from object
+      store key operations. Do not report CWE-22 unless local path traversal or
+      filesystem escape is plausible.
+    - For output encoding contexts, distinguish raw HTML/script/attribute output
+      from XML/JSON/framework writers that encode text. High CWE-79 probability
+      requires attacker-controlled data reaching an unsafe browser-interpreted
+      context without appropriate contextual encoding.
+    - Use semantic_contexts as supporting evidence, never as deterministic verdicts.
+      Prefer specific CWE ids only when the evidence supports the CWE semantics.
     - Mention crossArtifactJumpCount when cross-file jumps weaken confidence.
     - Reference path_index and node ids when making claims.
 

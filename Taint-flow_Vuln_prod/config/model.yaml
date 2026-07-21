@@ -1,19 +1,21 @@
-api_key: sk-f932d2a6894c46b7a46855378127040c
+api_key: sk-..
 models:
   source_risk:
     base_url: https://api.deepseek.com
-    model: deepseek-chat
+    model: deepseek-v4-flash
     temperature: 0.2
     max_tokens: 450
     timeout: 60
     prompt_file: ../rules/source_risk.yml
     parallel_workers: 1
+    thinking: {"type": "disabled"}
     
   sink_vuln:
     base_url: https://api.deepseek.com
-    model: deepseek-chat
+    model: deepseek-v4-flash
     temperature: 0.2
     max_tokens: 2200
     timeout: 120
     prompt_file: ../rules/sink_vuln.yml
     parallel_workers: 1
+    thinking: {"type": "disabled"}

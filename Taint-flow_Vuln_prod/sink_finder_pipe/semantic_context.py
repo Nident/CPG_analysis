@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
-class XmlParserContextBuilder:
+class SemanticContextBuilder:
     def __init__(self, rules: dict[str, Any]) -> None:
         self.rules = rules
-        self.sink_kind = self.text(rules["sink_kind"], "sink_kind")
+        self.kind = self.text(rules["context_kind"], "context_kind")
+        self.sink_kinds = set(self.string_list(rules["sink_kinds"], "sink_kinds"))
         self.limits = self.object_value(rules["limits"], "limits")
         self.signal_rules = self.object_value(rules["signals"], "signals")
 
@@ -16,44 +18,48 @@ class XmlParserContextBuilder:
         source_analysis: dict[str, Any] | None,
         expanded_context: dict[str, Any] | None,
         interprocedural_context: dict[str, Any] | None,
-        external_context_index: dict[int, dict[str, Any]],
+        external_context_index: dict[int, dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        paths = self.xml_paths(source_path_record)
+        paths = self.candidate_paths(source_path_record)
         if not paths:
             return None
-
-        matched_sink_ids = sorted({path["sink"]["nodeId"] for path in paths})
-        combined_context = self.combined_context(source_path_record, source_analysis, expanded_context, interprocedural_context)
-        external_contexts = self.external_contexts(matched_sink_ids, external_context_index)
-
-        return {
-            "contextKind": self.sink_kind,
+        text = self.truncate(self.text_blob([[path for _, path in paths], source_path_record.get("source"), source_analysis, expanded_context, interprocedural_context]))
+        sink_ids = sorted({path["sink"]["nodeId"] for _, path in paths})
+        context = {
+            "contextKind": self.kind,
             "sourceNodeId": source_path_record.get("sourceNodeId"),
-            "matchedSinkNodeIds": matched_sink_ids,
             "candidatePathCount": len(paths),
-            "candidatePaths": [self.path_context(path) for path in paths[: self.limit("max_paths")]],
+            "matchedSinkNodeIds": sink_ids,
+            "candidatePaths": [self.path_context(index, path) for index, path in paths[: self.limit("max_paths")]],
             "sinkGroups": self.sink_groups(paths),
             "flowEvidence": self.flow_evidence(source_analysis, expanded_context, interprocedural_context),
-            "signals": self.signals(combined_context),
-            "externalXmlContexts": external_contexts[: self.limit("max_contexts")],
+            "signals": self.signals(text),
         }
+        external = self.external_contexts(sink_ids, external_context_index or {})
+        if external:
+            context["externalContexts"] = external[: self.limit("max_external_contexts")]
+        return context
 
-    def xml_paths(self, record: dict[str, Any]) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for path in record.get("paths", []) if isinstance(record.get("paths"), list) else []:
-            if not isinstance(path, dict):
-                continue
-            sink = path.get("sink")
-            if isinstance(sink, dict) and sink.get("kind") == self.sink_kind and isinstance(sink.get("nodeId"), int):
-                result.append(path)
-        return result
+    def candidate_paths(self, record: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
+        paths = record.get("paths", [])
+        if not isinstance(paths, list):
+            return []
+        return [
+            (index, path)
+            for index, path in enumerate(paths)
+            if isinstance(path, dict)
+            and isinstance(path.get("sink"), dict)
+            and path["sink"].get("kind") in self.sink_kinds
+            and isinstance(path["sink"].get("nodeId"), int)
+        ]
 
-    def path_context(self, path: dict[str, Any]) -> dict[str, Any]:
+    def path_context(self, index: int, path: dict[str, Any]) -> dict[str, Any]:
         sink = self.object_value(path["sink"], "path.sink")
         evidence = self.object_value(path.get("evidence", {}), "path.evidence")
         return {
-            "pathIndex": path.get("pathIndex"),
+            "pathIndex": index,
             "sinkNodeId": sink.get("nodeId"),
+            "sinkKind": sink.get("kind"),
             "sinkRuleId": sink.get("ruleId"),
             "sinkEvidence": sink.get("evidence"),
             "pathQuality": {key: evidence.get(key) for key in self.string_list(self.rules["path_quality_fields"], "path_quality_fields")},
@@ -61,34 +67,28 @@ class XmlParserContextBuilder:
             "sinkFunction": self.function_summary(sink),
         }
 
-    def sink_groups(self, paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sink_groups(self, paths: list[tuple[int, dict[str, Any]]]) -> list[dict[str, Any]]:
         groups: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
-        for path in paths:
+        for _, path in paths:
             sink = self.object_value(path["sink"], "path.sink")
             function = self.function_summary(sink)
             key = (function.get("artifact"), function.get("fullName"), function.get("startLine"))
             group = groups.setdefault(
                 key,
-                {
-                    "function": function,
-                    "sinkNodeIds": [],
-                    "sinkEvidence": [],
-                    "signals": self.signals(self.text_blob(function)),
-                },
+                {"function": function, "sinkNodeIds": [], "sinkEvidence": [], "signals": self.signals(self.text_blob(function))},
             )
             group["sinkNodeIds"].append(sink.get("nodeId"))
             if sink.get("evidence") not in group["sinkEvidence"]:
                 group["sinkEvidence"].append(sink.get("evidence"))
-        return list(groups.values())[: self.limit("max_contexts")]
+        return list(groups.values())[: self.limit("max_groups")]
 
     def dangerous_arguments(self, sink: dict[str, Any]) -> list[dict[str, Any]]:
         roles = set(self.string_list(self.rules["dangerous_argument_roles"], "dangerous_argument_roles"))
         context = self.object_value(sink.get("context", {}), "sink.context")
-        result = []
-        for arg in context.get("arguments", []) if isinstance(context.get("arguments"), list) else []:
-            if isinstance(arg, dict) and arg.get("role") in roles:
-                result.append(arg)
-        return result
+        arguments = context.get("arguments", [])
+        if not isinstance(arguments, list):
+            return []
+        return [arg for arg in arguments if isinstance(arg, dict) and arg.get("role") in roles]
 
     @staticmethod
     def function_summary(sink: dict[str, Any]) -> dict[str, Any]:
@@ -133,8 +133,7 @@ class XmlParserContextBuilder:
         matches: list[dict[str, str]] = []
         for raw_rule in rules:
             rule = self.object_value(raw_rule, "signal")
-            tokens = self.signal_tokens(rule)
-            matched = [token for token in tokens if token.casefold() in target]
+            matched = [token for token in self.signal_tokens(rule) if token.casefold() in target]
             if matched:
                 matches.append({"id": self.text(rule["id"], "signal.id"), "description": self.text(rule["description"], "signal.description"), "matched": ", ".join(matched)})
             if len(matches) >= self.limit("max_signal_matches"):
@@ -146,9 +145,6 @@ class XmlParserContextBuilder:
         if isinstance(rule.get("contains"), str):
             return [rule["contains"]]
         return [item for item in rule.get("contains_any", []) if isinstance(item, str)]
-
-    def combined_context(self, *values: Any) -> str:
-        return self.truncate(self.text_blob(values))
 
     def text_blob(self, value: Any) -> str:
         if isinstance(value, dict):
@@ -186,6 +182,42 @@ class XmlParserContextBuilder:
     def string_list(value: Any, name: str) -> list[str]:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise TypeError(f"{name} must be list[str]")
+        return value
+
+    @staticmethod
+    def text(value: Any, name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be str")
+        return value
+
+
+class SemanticContextRegistry:
+    def __init__(self, project_dir: Path, config: dict[str, Any], read_yaml: Any) -> None:
+        self.builders = [
+            SemanticContextBuilder(read_yaml(project_dir / Path(self.text(item["rules"], "context.rules"))))
+            for item in self.list_value(config["contexts"], "contexts")
+            if isinstance(item, dict) and item.get("enabled", True)
+        ]
+
+    def build_all(
+        self,
+        source_path_record: dict[str, Any],
+        source_analysis: dict[str, Any] | None,
+        expanded_context: dict[str, Any] | None,
+        interprocedural_context: dict[str, Any] | None,
+        external_indexes: dict[str, dict[int, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for builder in self.builders:
+            context = builder.build(source_path_record, source_analysis, expanded_context, interprocedural_context, external_indexes.get(builder.kind))
+            if context is not None:
+                result[builder.kind] = context
+        return result
+
+    @staticmethod
+    def list_value(value: Any, name: str) -> list[Any]:
+        if not isinstance(value, list):
+            raise TypeError(f"{name} must be list")
         return value
 
     @staticmethod

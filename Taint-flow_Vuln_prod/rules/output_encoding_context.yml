@@ -1,0 +1,133 @@
+---
+version: 1
+description: Semantic output construction context. Covers HTML/XML/JSON/template/response writes and output encoding questions.
+
+context_kind: output_encoding
+
+sink_kinds:
+  - filesystem_write
+  - template_rendering
+
+limits:
+  max_paths: 12
+  max_groups: 8
+  max_external_contexts: 0
+  max_signal_matches: 12
+  max_code_chars: 2200
+
+path_quality_fields:
+  - pathQuality
+  - hasDataflow
+  - hasControlOnlyFlow
+  - hasDirectDataflowToSinkArgument
+  - crossArtifactJumpCount
+  - hasSyntheticEdges
+  - edgeTypeCounts
+
+dangerous_argument_roles:
+  - receiver_or_self
+  - first_argument
+  - second_argument
+  - third_argument
+
+signals:
+  output_sinks:
+    - id: raw-response-write
+      description: Code writes directly to an HTTP or text response.
+      contains_any:
+        - "getWriter()"
+        - "ServletOutputStream"
+        - ".write("
+        - ".append("
+        - "sendError"
+    - id: xml-writer
+      description: XML writer API is used; it may encode text but raw markup APIs need scrutiny.
+      contains_any:
+        - "XMLStreamWriter"
+        - "writeCharacters"
+        - "writeSimpleElement"
+        - "writeStartElement"
+        - "writeCData"
+    - id: template-render
+      description: Template rendering or view rendering is used.
+      contains_any:
+        - "render("
+        - "processTemplate"
+        - "getTemplate"
+        - "Template"
+        - "ModelAndView"
+
+  untrusted_output_hints:
+    - id: request-controlled-value
+      description: Request parameter, header, URI, body, or cookie may influence output.
+      contains_any:
+        - "getParameter"
+        - "getHeader"
+        - "getRequestURI"
+        - "getInputStream"
+        - "getCookies"
+    - id: object-key-reflection
+      description: Object key, prefix, marker, delimiter, or upload id may be reflected.
+      contains_any:
+        - "blobName"
+        - "containerName"
+        - "prefix"
+        - "marker"
+        - "delimiter"
+        - "uploadId"
+
+  encoding_indicators:
+    - id: html-encoding
+      description: HTML or attribute encoding is applied.
+      contains_any:
+        - "escapeHtml"
+        - "htmlEscape"
+        - "Encode.forHtml"
+        - "Encode.forHtmlAttribute"
+        - "StringEscapeUtils.escapeHtml"
+    - id: javascript-url-encoding
+      description: JavaScript, URL, or JSON encoding is applied.
+      contains_any:
+        - "Encode.forJavaScript"
+        - "URLEncoder.encode"
+        - "JsonGenerator"
+        - "ObjectMapper.writeValue"
+    - id: framework-autoescape
+      description: Framework/template engine may provide contextual autoescaping.
+      contains_any:
+        - "autoescape"
+        - "FreeMarker"
+        - "Thymeleaf"
+        - "Mustache"
+
+  risk_indicators:
+    - id: raw-html-or-script-context
+      description: Output context may be HTML, script, attribute, URL, or raw markup.
+      contains_any:
+        - "<script"
+        - "<html"
+        - "href="
+        - "onclick="
+        - "text/html"
+        - "writeRaw"
+        - "writeCData"
+    - id: unescaped-string-concat
+      description: Output is built by string concatenation or formatting.
+      contains_any:
+        - " + "
+        - "String.format"
+        - "format("
+        - "concat("
+
+  blocking_hints:
+    - id: xml-character-writer
+      description: XML character writer usually escapes text content.
+      contains_any:
+        - "writeCharacters"
+        - "writeSimpleElement"
+    - id: constant-or-enum-output
+      description: Output appears restricted to constants or small enumerated values.
+      contains_any:
+        - "equals(\"url\")"
+        - "case "
+        - "enum"

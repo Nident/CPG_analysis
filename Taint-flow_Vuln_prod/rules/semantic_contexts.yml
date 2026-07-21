@@ -1,0 +1,14 @@
+---
+version: 1
+description: Semantic evidence contexts used by sink_vuln_model. Contexts are sink-family oriented, not CWE oriented.
+
+contexts:
+  - id: parser
+    enabled: true
+    rules: rules/parser_context.yml
+  - id: path_object
+    enabled: true
+    rules: rules/path_object_context.yml
+  - id: output_encoding
+    enabled: true
+    rules: rules/output_encoding_context.yml

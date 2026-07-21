@@ -1,0 +1,108 @@
+---
+version: 1
+description: Semantic parser/deserializer context. Covers XML parser abuse, deserialization, structured parsing, and parser API misuse.
+
+context_kind: parser
+
+sink_kinds:
+  - xml_parser_security_api
+  - structured_parse
+
+limits:
+  max_paths: 12
+  max_groups: 8
+  max_external_contexts: 8
+  max_signal_matches: 12
+  max_code_chars: 2200
+
+path_quality_fields:
+  - pathQuality
+  - hasDataflow
+  - hasControlOnlyFlow
+  - hasDirectDataflowToSinkArgument
+  - crossArtifactJumpCount
+  - hasSyntheticEdges
+  - edgeTypeCounts
+
+dangerous_argument_roles:
+  - receiver_or_self
+  - first_argument
+  - second_argument
+
+signals:
+  parse_indicators:
+    - id: structured-parse-call
+      description: Structured content is parsed, deserialized, transformed, or unmarshalled.
+      contains_any:
+        - ".parse("
+        - ".readValue("
+        - ".load("
+        - ".loads("
+        - ".unmarshal("
+        - ".read("
+        - ".build("
+        - ".fromXML("
+        - "createXMLStreamReader"
+        - "createXMLEventReader"
+
+  hardening_indicators:
+    - id: secure-processing
+      description: XML secure processing is explicitly enabled.
+      contains_any:
+        - "FEATURE_SECURE_PROCESSING"
+        - "XMLConstants.FEATURE_SECURE_PROCESSING"
+    - id: external-content-restricted
+      description: External content, DTDs, or external entities are restricted.
+      contains_any:
+        - "disallow-doctype-decl"
+        - "external-general-entities"
+        - "external-parameter-entities"
+        - "ACCESS_EXTERNAL_DTD"
+        - "ACCESS_EXTERNAL_SCHEMA"
+        - "setExpandEntityReferences(false)"
+        - "setEntityResolver"
+        - "XMLResolver"
+    - id: safe-loader-or-schema
+      description: Parser appears constrained by safe loader, schema, type allowlist, or resolver policy.
+      contains_any:
+        - "safe_load"
+        - "SafeConstructor"
+        - "PolymorphicTypeValidator"
+        - "activateDefaultTyping"
+        - "disableDefaultTyping"
+        - "SchemaFactory"
+
+  untrusted_input_hints:
+    - id: stream-or-file-input
+      description: Parser input may originate from file, path, stream, reader, or request body.
+      contains_any:
+        - "Path "
+        - "File "
+        - "InputStream"
+        - "Reader"
+        - "getInputStream"
+        - "request body"
+        - "parsedFile"
+    - id: external-entrypoint
+      description: Nearby context mentions externally controlled entrypoints.
+      contains_any:
+        - "args"
+        - "getRequestURI"
+        - "getParameter"
+        - "getHeader"
+        - "System.getenv"
+        - "System.getProperty"
+
+  blocking_hints:
+    - id: generated-or-local-artifact
+      description: Context suggests local/generated artifacts rather than externally supplied parser input.
+      contains_any:
+        - "environment.xml"
+        - "test result"
+        - "report"
+        - "src/test"
+    - id: strongly-typed-parser-target
+      description: Parser target type appears fixed and may reduce exploitability.
+      contains_any:
+        - ".class"
+        - "TypeReference"

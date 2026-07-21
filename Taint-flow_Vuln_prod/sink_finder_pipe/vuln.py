@@ -11,7 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from model import ModelClient
-from sink_finder_pipe.xml_parser import XmlParserContextBuilder
+from sink_finder_pipe.semantic_context import SemanticContextRegistry
 from utils.env_utils import env_optional_int, env_optional_path, env_path, env_str, load_env
 
 
@@ -29,6 +29,7 @@ class PathAssessment(BaseModel):
     path_index: int
     sink_node_id: int
     sink_kind: str
+    candidate_cwes: list[str]
     vulnerability_probability: float = Field(ge=0.0, le=1.0)
     source_reaches_sink: bool
     attacker_controls_sink_argument: Literal["none", "partial", "full", "unknown"]
@@ -49,6 +50,7 @@ class SinkVulnerabilityAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vulnerability_probability: float = Field(ge=0.0, le=1.0)
+    candidate_cwes: list[str]
     summary: str
     source_assessment: SourceAssessment
     path_assessments: list[PathAssessment]
@@ -72,8 +74,8 @@ class SinkVulnPipeline:
         self.limit = env_optional_int("SINK_VULN_LIMIT")
         self.parallel_workers = env_optional_int("SINK_VULN_PARALLEL_WORKERS")
         self.rules = self.read_yaml(self.rules_path)
-        self.xml_rules = self.read_yaml(self.project_path(env_optional_path("SINK_VULN_XML_RULES") or Path(self.rules["inputs"]["xml_context_rules"])))
-        self.xml_context_builder = XmlParserContextBuilder(self.xml_rules)
+        self.semantic_rules_path = self.project_path(env_optional_path("SINK_VULN_SEMANTIC_CONTEXTS") or Path(self.rules["inputs"]["semantic_contexts"]))
+        self.semantic_contexts = SemanticContextRegistry(self.project_dir, self.read_yaml(self.semantic_rules_path), self.read_yaml)
         self.model_config = self.model_profile()
         self.client = self.model_client()
 
@@ -88,7 +90,7 @@ class SinkVulnPipeline:
             "source": self.index_dir(self.source_risk_dir, self.rules["inputs"]["source_risk_glob"]),
             "context": self.index_dir(self.context_dir, self.rules["inputs"]["context_expansion_glob"]),
             "interprocedural": self.index_dir(self.interprocedural_dir, self.rules["inputs"]["interprocedural_context_glob"]),
-            "xml": self.xml_external_context_index(),
+            "external_contexts": {"parser": self.external_context_index()},
         }
 
         results: list[dict[str, Any]] = []
@@ -113,6 +115,7 @@ class SinkVulnPipeline:
             "interproceduralContextDir": str(self.interprocedural_dir),
             "xmlContextDir": str(self.xml_context_dir) if self.xml_context_dir is not None else None,
             "rulesFile": str(self.rules_path),
+            "semanticContextRulesFile": str(self.semantic_rules_path),
             "modelConfigFile": str(self.model_config_path),
             "modelName": self.model_name,
             "outputDir": str(self.output_dir),
@@ -123,11 +126,10 @@ class SinkVulnPipeline:
         self.write_json(self.output_dir / self.rules["output"]["summary_file"], summary)
         return summary
 
-    def analyze_file(self, path: Path, indexes: dict[str, dict[int, dict[str, Any]]]) -> dict[str, Any]:
+    def analyze_file(self, path: Path, indexes: dict[str, Any]) -> dict[str, Any]:
         source_path_record = self.read_json(path)
         source_id = self.optional_int(source_path_record.get("sourceNodeId"))
         payload = self.payload(source_path_record, source_id, indexes)
-        xml_context = payload.get("xml_parser_context")
         prompt_path = self.output_dir / self.prompt_filename(path) if self.rules["output"]["save_prompts"] else None
         analysis = self.client.request(json.dumps(payload, ensure_ascii=False, indent=2), prompt_output_path=prompt_path)
         return {
@@ -137,27 +139,24 @@ class SinkVulnPipeline:
             "previousSourceAnalysisFile": self.index_file(indexes["source"].get(source_id)),
             "contextExpansionFile": self.index_file(indexes["context"].get(source_id)),
             "interproceduralContextFile": self.index_file(indexes["interprocedural"].get(source_id)),
-            "xmlParserContextFile": self.xml_context_file(xml_context),
+            "semanticContextFiles": self.semantic_context_files(payload.get("semantic_contexts")),
             "analysis": analysis.model_dump(),
         }
 
-    def payload(self, source_path_record: dict[str, Any], source_id: int | None, indexes: dict[str, dict[int, dict[str, Any]]]) -> dict[str, Any]:
+    def payload(self, source_path_record: dict[str, Any], source_id: int | None, indexes: dict[str, Any]) -> dict[str, Any]:
         source_analysis = self.index_data(indexes["source"].get(source_id))
         expanded_context = self.index_data(indexes["context"].get(source_id))
         interprocedural_context = self.index_data(indexes["interprocedural"].get(source_id))
-        xml_context = self.xml_context_builder.build(
-            source_path_record,
-            source_analysis,
-            expanded_context,
-            interprocedural_context,
-            indexes["xml"],
-        )
+        external_contexts = indexes["external_contexts"]
+        if not isinstance(external_contexts, dict):
+            raise TypeError("external_contexts index must be a mapping")
+        semantic_contexts = self.semantic_contexts.build_all(source_path_record, source_analysis, expanded_context, interprocedural_context, external_contexts)
         sections = {
             "source_path_record": self.limit_path_record(source_path_record),
             "previous_source_analysis": source_analysis,
             "expanded_context": expanded_context,
             "interprocedural_context": interprocedural_context,
-            "xml_parser_context": xml_context,
+            "semantic_contexts": semantic_contexts,
         }
         return {key: self.limit_code(sections[key]) for key in self.rules["payload"]["include_sections"]}
 
@@ -179,7 +178,7 @@ class SinkVulnPipeline:
                 index[node_id] = {"path": str(item), "data": data}
         return index
 
-    def xml_external_context_index(self) -> dict[int, dict[str, Any]]:
+    def external_context_index(self) -> dict[int, dict[str, Any]]:
         if self.xml_context_dir is None:
             return {}
         path = self.xml_context_dir / self.rules["inputs"]["xml_context_file"]
@@ -199,16 +198,18 @@ class SinkVulnPipeline:
         return index
 
     @staticmethod
-    def xml_context_file(xml_context: Any) -> str | None:
-        if not isinstance(xml_context, dict):
-            return None
-        contexts = xml_context.get("externalXmlContexts")
-        if not isinstance(contexts, list):
-            return None
-        for context in contexts:
-            if isinstance(context, dict) and isinstance(context.get("path"), str):
-                return context["path"]
-        return None
+    def semantic_context_files(semantic_contexts: Any) -> list[str]:
+        if not isinstance(semantic_contexts, dict):
+            return []
+        files: list[str] = []
+        for context in semantic_contexts.values():
+            external = context.get("externalContexts") if isinstance(context, dict) else None
+            if not isinstance(external, list):
+                continue
+            for item in external:
+                if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"] not in files:
+                    files.append(item["path"])
+        return files
 
     def limit_path_record(self, record: dict[str, Any]) -> dict[str, Any]:
         data = self.limit_code(record)
@@ -256,7 +257,7 @@ class SinkVulnPipeline:
         prompt = Path(self.str_value(profile["prompt_file"], "prompt_file"))
         return prompt if prompt.is_absolute() else self.model_config_path.parent / prompt
 
-    def error_record(self, path: Path, indexes: dict[str, dict[int, dict[str, Any]]], error: Exception) -> dict[str, Any]:
+    def error_record(self, path: Path, indexes: dict[str, Any], error: Exception) -> dict[str, Any]:
         source_id = self.optional_int(self.read_json(path).get("sourceNodeId"))
         return {
             "status": "error",
@@ -265,7 +266,7 @@ class SinkVulnPipeline:
             "previousSourceAnalysisFile": self.index_file(indexes["source"].get(source_id)),
             "contextExpansionFile": self.index_file(indexes["context"].get(source_id)),
             "interproceduralContextFile": self.index_file(indexes["interprocedural"].get(source_id)),
-            "xmlParserContextFile": None,
+            "semanticContextFiles": [],
             "error": {"type": type(error).__name__, "message": str(error)},
         }
 
