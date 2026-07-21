@@ -1,0 +1,106 @@
+---
+version: 1
+description: Synthetic interprocedural propagation context after deterministic expansion.
+
+sink_rules: rules/sink_finder.yml
+
+search:
+  max_depth: 8
+  max_paths: 25
+  max_nodes: 400
+  max_same_name_uses: 8
+  parallel_workers: 4
+
+output:
+  summary_file: summary.json
+  source_file: "{index:06d}_{node_part}_interprocedural_{status}.json"
+
+source_seeds:
+  - type: source
+    role: source
+  - type: object_field
+    field: assignedTo
+    node_id_key: nodeId
+    role: assigned_to
+  - type: list_field
+    field: dataflow
+    node_id_key: nodeId
+    role: source_dataflow
+  - type: related_uses
+    field: relatedUses
+    node_id_key: nodeId
+    role: related_use
+    parent_field: parents
+    parent_node_id_key: nodeId
+    parent_role: related_use_parent
+  - type: expansion_context
+    role: context_seed
+    fields:
+      - structuredParseCalls
+      - interestingFieldAccesses
+    downstream_sink_paths_field: downstreamSinkPaths
+  - type: local_parse_calls
+    role: local_parse_call
+
+real_edges:
+  edge_types:
+    - DFG
+    - PDG
+    - EOG
+    - RETURN_VALUE
+    - RETURN_VALUES
+    - ARGUMENTS
+    - OPERATOR_ARGUMENTS
+    - LHS
+    - RHS
+    - VALUE
+    - KEY
+  pdg_dependence: DATA
+
+synthetic_edges:
+  same_name_use: SYN_SAME_NAME_USE
+  argument_to_call: SYN_ARG_TO_CALL
+  call_argument_to_parameter: SYN_CALL_ARG_TO_PARAM
+  return_to_call_assignment: SYN_RETURN_TO_CALL_ASSIGN
+  call_to_assignment: SYN_CALL_TO_ASSIGN
+
+function_index:
+  function_labels_any:
+    - Function
+    - Method
+  parameter_edges:
+    - PARAMETERS
+  return_labels_any:
+    - Return
+  invoke_edge: INVOKES
+  assignment:
+    rhs_edge: RHS
+    lhs_edge: LHS
+  argument_edges:
+    - ARGUMENTS
+    - OPERATOR_ARGUMENTS
+  reference_labels_any:
+    - Reference
+    - Parameter
+
+local_parse_calls:
+  haystack_startswith_any:
+    - json.load(
+    - json.loads(
+    - yaml.safe_load(
+    - yaml.load(
+    - toml.load(
+    - toml.loads(
+    - pickle.load(
+    - pickle.loads(
+    - common_config.parse(
+
+function_summaries:
+  limit: 40
+  function_max_code_chars: 5000
+  node_max_code_chars: 1000
+  callsites_limit: 20
+
+nodes:
+  seed_max_code_chars: 1600
+  path_max_code_chars: 1600

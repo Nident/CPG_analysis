@@ -1,0 +1,111 @@
+---
+version: 1
+description: Sink vulnerability LLM verification prompt, payload, input, and output settings.
+
+inputs:
+  sink_path_glob: "*_ok.json"
+  source_risk_glob: "*_ok.json"
+  context_expansion_glob: "*_context_ok.json"
+  interprocedural_context_glob: "*_interprocedural_ok.json"
+  xml_context_file: contexts.json
+  xml_context_rules: rules/xml_parser_context.yml
+
+payload:
+  max_paths: 10
+  max_code_chars: 1200
+  include_sections:
+    - source_path_record
+    - previous_source_analysis
+    - expanded_context
+    - interprocedural_context
+    - xml_parser_context
+
+output:
+  save_prompts: true
+  result_file: "{input_stem}_{status}.json"
+  prompt_file: "{input_stem}_prompt.yaml"
+  summary_file: summary.json
+
+prompt:
+  system_prompt: |
+    You are a senior application security reviewer. Verify whether candidate
+    source-to-sink paths represent plausible vulnerabilities. Treat graph paths
+    and deterministic context as evidence, not proof.
+
+  user_prompt: |
+    Analyze the following source-to-sink path bundle.
+
+    Payload sections:
+    - source_path_record: source metadata and candidate paths to sinks.
+    - previous_source_analysis: earlier source-risk hypotheses, or null.
+    - expanded_context: deterministic downstream CPG expansion, or null.
+    - interprocedural_context: synthetic cross-function propagation context, or null.
+    - xml_parser_context: optional XML parser API context. This is evidence only,
+      never a deterministic verdict.
+
+    Return only valid JSON matching this structure:
+
+    {
+      "vulnerability_probability": 0.0,
+      "summary": "Short overall conclusion for this source.",
+      "source_assessment": {
+        "attacker_control": "none | partial | full | unknown",
+        "trust_boundary": "Short description of who controls the source.",
+        "relevant_previous_hypotheses": [
+          "Which previous hypotheses are supported or contradicted."
+        ]
+      },
+      "path_assessments": [
+        {
+          "path_index": 0,
+          "sink_node_id": 123,
+          "sink_kind": "filesystem_write",
+          "vulnerability_probability": 0.0,
+          "source_reaches_sink": true,
+          "attacker_controls_sink_argument": "none | partial | full | unknown",
+          "sanitizers_or_guards": [
+            "Relevant validation, conversion, constants, allowlists, branch guards, or absence of them."
+          ],
+          "blocking_conditions": [
+            "Reasons this path may be false positive or non-exploitable."
+          ],
+          "evidence": [
+            "Concrete node ids, snippets, and edge facts."
+          ],
+          "reasoning": "Concise explanation grounded in provided evidence."
+        }
+      ],
+      "most_interesting_paths": [
+        {
+          "path_index": 0,
+          "why": "Why this path deserves follow-up."
+        }
+      ],
+      "follow_up_checks": [
+        "Specific next checks."
+      ]
+    }
+
+    Rules:
+    - Return probabilities, not categorical verdicts.
+    - vulnerability_probability must be 0.0 to 1.0.
+    - Keep all lists short and high signal.
+    - Use path.evidence.pathQuality as the main reliability signal.
+    - High probability requires attacker-controlled data plausibly reaching the
+      dangerous sink argument without adequate guards.
+    - Do not assign high probability only because a path reaches a sink.
+    - For every path, inspect sink.context.arguments and state whether the dangerous
+      argument is controlled, constant, derived, guarded, or unknown.
+    - Use expanded_context and interprocedural_context to support or weaken the
+      path evidence, especially for parse/read -> return -> caller -> callee chains.
+    - For xml_parser_security_api, decide whether externally supplied XML is parsed
+      without effective hardening. Missing hardening matters, but xml_parser_context
+      is still only supporting evidence.
+    - Mention crossArtifactJumpCount when cross-file jumps weaken confidence.
+    - Reference path_index and node ids when making claims.
+
+    LangChain JSON schema instructions:
+    {{ format_instructions }}
+
+    Payload:
+    {{ source_json }}

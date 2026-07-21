@@ -1,0 +1,86 @@
+---
+version: 1
+description: Source risk LLM triage settings and prompt.
+
+payload:
+  max_chars: 6000
+  include_fields:
+    - nodeId
+    - language
+    - ruleId
+    - kind
+    - confidence
+    - reason
+    - artifact
+    - startLine
+    - endLine
+    - labels
+    - name
+    - fullName
+    - code
+    - assignedTo
+    - enclosingFunction
+    - dataflow
+
+output:
+  save_prompts: true
+  result_file: "{index:06d}_{node_part}_{status}.json"
+  prompt_file: "{index:06d}_{node_part}_prompt.yaml"
+
+prompt:
+  system_prompt: |
+    You are a security code-audit assistant. Analyze one CPG candidate source at a time.
+    Keep the answer short, concrete, and hypothesis-oriented. Do not claim a confirmed
+    vulnerability without sink/data-flow evidence.
+
+  user_prompt: |
+    Analyze this input source from a CPG extraction result.
+
+    Return only valid JSON matching this exact structure:
+
+    {
+      "source_summary": "One short sentence describing what external input enters the program here.",
+      "vulnerability_probability": 0.0,
+      "trust_boundary": "Who or what controls the value, for example env, CLI user, config file, network peer, local filesystem.",
+      "attacker_control": "none | partial | full | unknown",
+      "possible_vulnerability_classes": [
+        "Short CWE/bug-class labels that could become relevant if this value reaches a dangerous sink."
+      ],
+      "hypotheses": [
+        {
+          "id": "H1",
+          "title": "Short falsifiable hypothesis.",
+          "sink_classes_to_check": [
+            "Concrete sink classes to collect next, for example shell execution, filesystem write, template rendering, SQL query, HTTP request, deserialization, authz decision."
+          ],
+          "expected_taint_shape": "What data-flow shape would confirm concern, including transformations or field/member access to follow.",
+          "verification_steps": [
+            "Concrete checks for the next model after sinks are collected."
+          ]
+        }
+      ],
+      "arguments_for_vulnerability": [
+        "Brief evidence from this source metadata that makes exploitation plausible."
+      ],
+      "arguments_against_vulnerability": [
+        "Brief evidence from this source metadata that suggests benign use or low exploitability."
+      ],
+      "missing_evidence": [
+        "Specific evidence needed before calling this a real vulnerability."
+      ],
+      "priority": "low | medium | high"
+    }
+
+    Rules:
+    - Keep every list short: 1-4 items.
+    - vulnerability_probability must be a number from 0.0 to 1.0 estimating whether this source can plausibly participate in a vulnerability after sink/path evidence is collected.
+    - Use low values when the source appears internal, constant-like, or only control-flow relevant; use higher values when attacker control is plausible and dangerous sink classes are likely.
+    - Do not invent sinks that are not present in the source metadata; describe them as hypotheses to check.
+    - Prefer specific vulnerability classes over generic "injection" when possible.
+    - priority=high only when the source is highly attacker-controlled and related uses already suggest a dangerous direction.
+
+    LangChain JSON schema instructions:
+    {{ format_instructions }}
+
+    Source:
+    {{ source_json }}

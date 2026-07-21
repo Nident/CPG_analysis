@@ -1,0 +1,287 @@
+---
+version: 1
+description: Sink candidate rules, graph traversal, context, and output settings.
+
+search:
+  max_depth: 8
+  max_paths_per_source: 25
+  parallel_workers: 4
+
+output:
+  sink_candidates_file: sink_candidates.json
+  summary_file: summary.json
+  source_file: "{index:06d}_{node_part}_{status}.json"
+
+source_seeds:
+  - type: object_field
+    field: assignedTo
+    node_id_key: nodeId
+    role: assigned_to
+    edge_type: SOURCE_ASSIGNED_TO
+  - type: list_field
+    field: dataflow
+    node_id_key: nodeId
+    role: source_dataflow
+    edge_type: SOURCE_DATAFLOW_SUMMARY
+  - type: related_uses
+    field: relatedUses
+    node_id_key: nodeId
+    role: related_use
+    edge_type: SOURCE_RELATED_USE
+    parent_field: parents
+    parent_node_id_key: nodeId
+    parent_role: related_use_parent
+    parent_edge_type_prefix: SOURCE_RELATED_USE_PARENT
+
+traversal:
+  directed_edges:
+    - DFG
+    - PDG
+    - EOG
+    - CDG
+    - INVOKES
+  structural_edges:
+    - ARGUMENTS
+    - OPERATOR_ARGUMENTS
+    - AST
+    - BASE
+    - OPERATOR_BASE
+    - LHS
+    - RHS
+    - VALUE
+    - KEY
+    - RECEIVER
+    - CONDITION
+    - BRANCHED_BY
+
+context:
+  summary_max_code_chars: 1200
+  sink_node_max_code_chars: 2000
+  enclosing_function:
+    labels_any:
+      - Function
+      - Method
+    max_depth: 30
+    max_code_chars: 5000
+  enclosing_namespace:
+    labels_any:
+      - Namespace
+      - TranslationUnit
+    max_depth: 30
+    max_code_chars: 1200
+  argument_edges:
+    - ARGUMENTS
+    - OPERATOR_ARGUMENTS
+  base_edges:
+    - BASE
+    - OPERATOR_BASE
+  receiver_edges:
+    - RECEIVER
+  argument_roles:
+    "0": receiver_or_self
+    "1": first_argument
+    "2": second_argument
+    "3": third_argument
+  incoming_data_dependencies:
+    edge_types:
+      - DFG
+      - PDG
+    dependence: DATA
+    limit: 10
+    max_code_chars: 1000
+  incoming_control_dependencies:
+    edge_types:
+      - CDG
+      - PDG
+    dependence: CONTROL
+    limit: 10
+    max_code_chars: 1000
+  parent_statements:
+    labels_any:
+      - Assign
+      - Return
+      - IfStatement
+      - ForStatement
+      - WhileStatement
+      - Block
+      - Function
+    max_depth: 12
+    limit: 5
+    max_code_chars: 2000
+
+sinks:
+  - id: python-command-execution-call
+    kind: command_execution
+    severity: high
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      any:
+        - code_regex: "\\bos\\.system\\s*\\(|\\bos\\.popen\\s*\\("
+        - code_contains_all:
+            - "subprocess."
+          haystack_contains_any:
+            - popen
+            - call
+            - run
+            - check_output
+            - check_call
+
+  - id: python-dynamic-code-execution
+    kind: code_execution
+    severity: high
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      any:
+        - code_regex: "\\beval\\s*\\(|\\bexec\\s*\\("
+        - haystack_contains_any:
+            - exec_module
+
+  - id: python-open-write
+    kind: filesystem_write
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      any:
+        - name_equals_any:
+            - open
+        - code_regex: "\\bopen\\s*\\("
+      code_regex: "['\"][wax+][^'\"]*['\"]"
+
+  - id: python-open-read
+    kind: filesystem_read
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      any:
+        - name_equals_any:
+            - open
+        - code_regex: "\\bopen\\s*\\("
+      not_code_regex: "['\"][wax+][^'\"]*['\"]"
+
+  - id: python-filesystem-mutation
+    kind: filesystem_mutation
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      haystack_contains_any:
+        - copyfile
+        - copytree
+        - copy2
+        - rmtree
+        - remove
+        - move
+        - copystat
+
+  - id: python-write-call
+    kind: filesystem_write
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      any:
+        - code_regex: "\\.write\\s*\\("
+        - name_contains_any:
+            - ".write"
+
+  - id: python-network-request
+    kind: network_request
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      code_contains_all:
+        - "requests."
+      haystack_contains_any:
+        - get
+        - post
+        - put
+        - delete
+        - patch
+
+  - id: python-structured-data-load
+    kind: structured_parse
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      haystack_contains_any:
+        - pickle.load
+        - pickle.loads
+        - yaml.load
+        - json.load
+
+  - id: java-xml-parser-security-api
+    kind: xml_parser_security_api
+    severity: high
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      haystack_contains_any:
+        - documentbuilderfactory.newinstance
+        - documentbuilderfactory.newdocumentbuilder
+        - documentbuilder.parse
+        - saxparserfactory.newinstance
+        - saxparser.parse
+        - xmlreader.parse
+        - xmlinputfactory.newinstance
+        - xmlinputfactory.createxmlstreamreader
+        - xmlinputfactory.createxmleventreader
+        - schemafactory.newinstance
+        - schemafactory.newschema
+        - transformerfactory.newinstance
+        - transformerfactory.newtransformer
+        - saxtransformerfactory.newinstance
+        - xmlmapper.readvalue
+        - unmarshaller.unmarshal
+        - saxreader.read
+        - saxbuilder.build
+        - xstream.fromxml
+
+  - id: python-template-rendering
+    kind: template_rendering
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      haystack_contains_any:
+        - jinja2.environment
+        - filesystemloader
+        - dictloader
+        - get_template
+        - ".render"
+
+  - id: python-archive-operation
+    kind: archive_operation
+    severity: medium
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      haystack_contains_any:
+        - tarfile.open
+        - extractall
+        - ".extract("
+
+  - id: python-sql-execution
+    kind: sql_execution
+    severity: high
+    evidence: code
+    conditions:
+      node_labels_any:
+        - Call
+      code_regex: "\\.execute\\s*\\(|\\.executemany\\s*\\("

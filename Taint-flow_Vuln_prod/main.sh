@@ -43,43 +43,43 @@ printf 'python: %s\n' "${PYTHON_BIN}"
 run_step \
   "${RUN_SOURCE_CANDIDATES}" \
   "Find source candidates" \
-  "SOURCES_CANDIDATE_ENV_FILE" \
-  "${ROOT_DIR}/config/sources_candidate_finder.env" \
+  "SOURCE_CANDIDATE_ENV_FILE" \
+  "${SOURCE_CANDIDATE_ENV_FILE:-${ROOT_DIR}/config/source_candidate_finder.env}" \
   "source_candidate_finder.py"
 
 run_step \
   "${RUN_SOURCE_RISK}" \
   "Analyze source risk with LLM" \
   "SOURCE_RISK_ENV_FILE" \
-  "${ROOT_DIR}/config/source_risk_model.env" \
+  "${SOURCE_RISK_ENV_FILE:-${ROOT_DIR}/config/source_risk_model.env}" \
   "source_risk_model.py"
 
 run_step \
   "${RUN_SINK_PATHS}" \
   "Find sink paths" \
   "SINK_PATH_ENV_FILE" \
-  "${ROOT_DIR}/config/sink_path_finder.env" \
+  "${SINK_PATH_ENV_FILE:-${ROOT_DIR}/config/sink_path_finder.env}" \
   "sink_path_finder.py"
 
 run_step \
   "${RUN_CONTEXT_EXPANDER}" \
   "Expand deterministic context" \
   "CONTEXT_EXPANDER_ENV_FILE" \
-  "${ROOT_DIR}/config/context_expander.env" \
+  "${CONTEXT_EXPANDER_ENV_FILE:-${ROOT_DIR}/config/context_expander.env}" \
   "context_expander.py"
 
 run_step \
   "${RUN_INTERPROCEDURAL_CONTEXT}" \
   "Build interprocedural context" \
   "INTERPROCEDURAL_CONTEXT_ENV_FILE" \
-  "${ROOT_DIR}/config/interprocedural_context.env" \
+  "${INTERPROCEDURAL_CONTEXT_ENV_FILE:-${ROOT_DIR}/config/interprocedural_context.env}" \
   "interprocedural_context.py"
 
 run_step \
   "${RUN_SINK_VULN}" \
   "Analyze source-to-sink vulnerabilities with LLM" \
   "SINK_VULN_ENV_FILE" \
-  "${ROOT_DIR}/config/sink_vuln_model.env" \
+  "${SINK_VULN_ENV_FILE:-${ROOT_DIR}/config/sink_vuln_model.env}" \
   "sink_vuln_model.py"
 
 printf '\nPipeline finished successfully.\n'

@@ -1,0 +1,107 @@
+---
+version: 1
+description: Evidence-only context builder for XML parser security API candidates.
+
+sink_kind: xml_parser_security_api
+
+limits:
+  max_paths: 12
+  max_contexts: 8
+  max_signal_matches: 12
+  max_code_chars: 1800
+
+path_quality_fields:
+  - category
+  - hasDataflow
+  - hasControlOnlyFlow
+  - crossArtifactJumpCount
+  - hasSyntheticEdges
+  - edgeTypeCounts
+
+dangerous_argument_roles:
+  - receiver_or_self
+  - first_argument
+  - second_argument
+
+signals:
+  parse_indicators:
+    - id: xml-parse-call
+      description: XML content is parsed or deserialized.
+      contains_any:
+        - ".parse("
+        - ".readvalue("
+        - ".unmarshal("
+        - ".read("
+        - ".build("
+        - ".fromxml("
+        - "createxmlstreamreader"
+        - "createxmleventreader"
+
+  hardening_indicators:
+    - id: secure-processing
+      description: Secure processing is explicitly enabled.
+      contains_any:
+        - "FEATURE_SECURE_PROCESSING"
+        - "XMLConstants.FEATURE_SECURE_PROCESSING"
+    - id: disallow-doctype
+      description: DOCTYPE declarations are disabled.
+      contains_any:
+        - "disallow-doctype-decl"
+        - "http://apache.org/xml/features/disallow-doctype-decl"
+    - id: external-entities-disabled
+      description: External entities are disabled.
+      contains_any:
+        - "external-general-entities"
+        - "external-parameter-entities"
+        - "ACCESS_EXTERNAL_DTD"
+        - "ACCESS_EXTERNAL_SCHEMA"
+        - "setExpandEntityReferences(false)"
+    - id: resolver-installed
+      description: A resolver is installed and may block external entities.
+      contains_any:
+        - "setEntityResolver"
+        - "EntityResolver"
+        - "XMLResolver"
+
+  untrusted_input_hints:
+    - id: path-like-input
+      description: XML input is read through a path, file, stream, reader, or directory.
+      contains_any:
+        - "Path "
+        - "File "
+        - "InputStream"
+        - "Reader"
+        - "directory"
+        - "parsedFile"
+    - id: user-controlled-entrypoint
+      description: Nearby context mentions external entrypoints or user-controlled sources.
+      contains_any:
+        - "args"
+        - "getRequestURI"
+        - "getParameter"
+        - "System.getenv"
+        - "System.getProperty"
+    - id: file-discovery
+      description: Nearby context suggests files may be discovered from a directory.
+      contains_any:
+        - "Files.walk"
+        - "newDirectoryStream"
+        - "listFiles"
+        - "visitFile"
+        - "resolve("
+        - ".xml"
+
+  blocking_hints:
+    - id: test-code
+      description: Candidate path or artifact appears to pass through test-only code.
+      contains_any:
+        - "/src/test/"
+        - "Test.java"
+        - "should"
+    - id: local-artifact
+      description: Context suggests local generated files rather than externally supplied XML.
+      contains_any:
+        - "resultsDirectory"
+        - "environment.xml"
+        - "test result"
+        - "report"

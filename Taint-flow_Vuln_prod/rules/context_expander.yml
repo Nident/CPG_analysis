@@ -1,0 +1,96 @@
+---
+version: 1
+description: Deterministic downstream context expansion after sink path discovery.
+
+sink_rules: rules/sink_finder.yml
+
+search:
+  max_depth: 5
+  max_nodes: 250
+  max_sinks: 25
+  parallel_workers: 4
+
+output:
+  summary_file: summary.json
+  source_file: "{index:06d}_{node_part}_context_{status}.json"
+
+source_seeds:
+  - type: source
+    role: source
+  - type: object_field
+    field: assignedTo
+    node_id_key: nodeId
+    role: assigned_to
+  - type: list_field
+    field: dataflow
+    node_id_key: nodeId
+    role: source_dataflow
+  - type: related_uses
+    field: relatedUses
+    node_id_key: nodeId
+    role: related_use
+    parent_field: parents
+    parent_node_id_key: nodeId
+    parent_role: related_use_parent
+  - type: sink_path_evidence
+    structured_sink_kind: structured_parse
+    structured_role: structured_parse_call
+    argument_ids_field: sinkArgumentNodeIdsInPath
+    argument_role: path_sink_argument
+    dependency_ids_field: sinkDataDependencyNodeIdsInPath
+    dependency_role: path_sink_data_dependency
+
+forward_edges:
+  edge_types:
+    - DFG
+    - PDG
+    - EOG
+    - ARGUMENTS
+    - OPERATOR_ARGUMENTS
+    - RETURN_VALUE
+    - RETURN_VALUES
+    - LHS
+    - RHS
+    - VALUE
+    - KEY
+    - BASE
+    - OPERATOR_BASE
+    - RECEIVER
+  pdg_dependence: DATA
+  stop_external_declarations:
+    labels_any:
+      - Function
+      - Method
+    artifact_is_null: true
+
+interesting_field_accesses:
+  labels_any:
+    - MemberAccess
+    - Subscription
+    - SubscriptExpression
+  code_contains_any:
+    - "["
+    - "."
+  limit: 80
+  max_code_chars: 1000
+
+structured_parse_calls:
+  haystack_contains_any:
+    - json.load
+    - json.loads
+    - yaml.safe_load
+    - common_config.parse
+  limit: 40
+  max_code_chars: 1000
+
+function_contexts:
+  labels_any:
+    - Function
+    - Method
+  max_depth: 30
+  max_code_chars: 5000
+  limit: 30
+
+nodes:
+  seed_max_code_chars: 1600
+  path_max_code_chars: 1600

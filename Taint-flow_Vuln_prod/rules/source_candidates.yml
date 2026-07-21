@@ -1,0 +1,414 @@
+---
+version: 1
+description: Source candidate rules for taint-flow analysis.
+
+cpg:
+  source_node_labels_any:
+    - Annotation
+    - Call
+    - MemberCall
+    - Subscription
+    - Reference
+    - MemberAccess
+    - Parameter
+  skip_multiline_code: true
+  function_labels_any:
+    - Function
+    - Method
+  assignment:
+    rhs_edge: RHS
+    lhs_edge: LHS
+  dataflow:
+    max_depth_default: 2
+    edges:
+      - type: DFG
+      - type: PDG
+        property_filters:
+          dependence: DATA
+
+languages:
+  python:
+    detection:
+      language_label_keywords:
+        - pythonlanguage
+      artifact_extensions:
+        - ".py"
+    rules:
+      - id: python-os-environ-get
+        kind: environment_variable
+        confidence: high
+        reason: process environment value is controlled outside the program
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*os\\.environ\\.get\\s*\\("
+
+      - id: python-os-getenv
+        kind: environment_variable
+        confidence: high
+        reason: process environment value is controlled outside the program
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*os\\.getenv\\s*\\("
+
+      - id: python-environ-get
+        kind: environment_variable
+        confidence: medium
+        reason: environment-like get() call
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*environ\\.get\\s*\\("
+
+      - id: python-argparse-parse-args
+        kind: command_line_arguments
+        confidence: high
+        reason: argparse parses command-line input
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          any:
+            - code_regex_match: "^\\s*[\\w.]+\\.parse(_known)?_args\\s*\\("
+            - name_suffix_any:
+                - ".parse_args"
+                - ".parse_known_args"
+
+      - id: python-input
+        kind: stdin
+        confidence: high
+        reason: input() reads from standard input
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          any:
+            - code_regex_match: "^\\s*input\\s*\\("
+            - name_equals_any:
+                - input
+
+      - id: python-request-json
+        kind: http_request_body
+        confidence: high
+        reason: web request JSON body
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\brequest\\.get_json\\s*\\("
+
+      - id: python-request-field
+        kind: http_request_field
+        confidence: high
+        reason: web request field/header/cookie data
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\brequest\\.(args|form|files|headers|cookies|values|get)\\b"
+
+      - id: python-socket-recv
+        kind: network_receive
+        confidence: low
+        low_confidence: true
+        reason: socket-like receive call
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.(recv|recvfrom)\\s*\\("
+
+      - id: python-os-environ-subscript
+        kind: environment_variable
+        confidence: high
+        reason: process environment value is controlled outside the program
+        conditions:
+          node_labels_any:
+            - Subscription
+          code_regex: "\\b(os\\.)?environ\\s*\\["
+
+      - id: python-sys-argv-subscript
+        kind: command_line_arguments
+        confidence: high
+        reason: sys.argv contains command-line input
+        conditions:
+          node_labels_any:
+            - Subscription
+          code_regex: "\\bsys\\.argv\\s*\\["
+
+      - id: python-request-mapping-access
+        kind: http_request_field
+        confidence: high
+        reason: web request mapping access
+        conditions:
+          node_labels_any:
+            - Subscription
+          code_regex: "\\brequest\\.(args|form|files|headers|cookies|values|GET|POST|META)\\b"
+
+      - id: python-sys-argv-reference
+        kind: command_line_arguments
+        confidence: high
+        reason: sys.argv contains command-line input
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex_match: "^\\s*sys\\.argv(\\s*\\[|\\s*$)"
+
+      - id: python-stdin-reference
+        kind: stdin
+        confidence: high
+        reason: standard input stream
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex_match: "^\\s*(sys\\.stdin(\\.|\\s*$)|stdin\\s*$)"
+
+      - id: python-request-data-reference
+        kind: http_request_field
+        confidence: high
+        reason: web request object data
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex: "\\brequest\\.(data|body|json|GET|POST|META)\\b"
+
+  java:
+    detection:
+      language_label_keywords:
+        - javalanguage
+      artifact_extensions:
+        - ".java"
+    rules:
+      - id: java-system-getenv
+        kind: environment_variable
+        confidence: high
+        reason: JVM process environment value is controlled outside the program
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*System\\.getenv\\s*\\("
+
+      - id: java-system-get-property
+        kind: system_property
+        confidence: medium
+        reason: JVM system property can be supplied externally
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*System\\.getProperty\\s*\\("
+
+      - id: java-servlet-request-input
+        kind: http_request_field
+        confidence: high
+        reason: Servlet request input API
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(getParameter|getParameterValues|getParameterMap|getHeader|getHeaders|getCookies|getReader|getInputStream)\\s*\\("
+
+      - id: java-servlet-request-metadata
+        kind: http_request_metadata
+        confidence: high
+        reason: Servlet request metadata is client-controlled
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(getQueryString|getRequestURI|getRequestURL|getPathInfo|getRemoteAddr)\\s*\\("
+
+      - id: java-request-body-getter
+        kind: http_request_body
+        confidence: medium
+        reason: request/entity body accessor
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*getBody\\s*\\("
+
+      - id: java-stdin-reader
+        kind: stdin
+        confidence: high
+        reason: reads from standard input
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "(new\\s+Scanner\\s*\\(\\s*System\\.in\\s*\\)|\\b(InputStreamReader|BufferedReader|Scanner)\\b.*System\\.in)"
+
+      - id: java-stream-read
+        kind: stream_or_network_read
+        confidence: low
+        low_confidence: true
+        reason: generic Java stream/socket read
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(accept|getInputStream|readLine|read)\\s*\\("
+
+      - id: java-system-in-reference
+        kind: stdin
+        confidence: high
+        reason: standard input stream
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex_match: "^\\s*(System\\.in|System\\.console\\(\\))\\s*$"
+
+      - id: java-main-args-parameter
+        kind: command_line_arguments
+        confidence: medium
+        reason: Java main args convention
+        conditions:
+          node_labels_any:
+            - Parameter
+          code_regex: "\\bString\\s*\\[\\s*\\]\\s+args\\b|\\bString\\.\\.\\.\\s+args\\b"
+
+      - id: java-web-binding-annotation
+        kind: http_request_annotation
+        confidence: medium
+        reason: web framework request binding annotation
+        conditions:
+          node_labels_any:
+            - Annotation
+            - Parameter
+          code_regex: "@(RequestParam|RequestBody|PathVariable|RequestHeader|CookieValue|ModelAttribute|QueryParam|PathParam|HeaderParam|CookieParam|FormParam)\\b"
+
+  go:
+    detection:
+      language_label_keywords:
+        - golanguage
+        - golang
+      artifact_extensions:
+        - ".go"
+    rules:
+      - id: go-os-getenv
+        kind: environment_variable
+        confidence: high
+        reason: process environment value is controlled outside the program
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*os\\.(Getenv|LookupEnv)\\s*\\("
+
+      - id: go-flag-package
+        kind: command_line_arguments
+        confidence: high
+        reason: Go flag package reads command-line input
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex_match: "^\\s*flag\\.(Parse|String|StringVar|Int|IntVar|Bool|BoolVar|Var)\\s*\\("
+
+      - id: go-http-request-accessor
+        kind: http_request_field
+        confidence: high
+        reason: net/http request accessor
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(FormValue|PostFormValue|Cookie)\\s*\\("
+
+      - id: go-http-query-header
+        kind: http_request_field
+        confidence: high
+        reason: net/http query/header accessor
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "(\\.\\s*URL\\.Query\\s*\\(|\\.\\s*Header\\.Get\\s*\\()"
+
+      - id: go-read-request-body
+        kind: http_request_body
+        confidence: high
+        reason: reads net/http request body
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\b(io|ioutil)\\.ReadAll\\s*\\(\\s*[^)]*\\.Body\\s*\\)"
+
+      - id: go-parse-form
+        kind: http_request_field
+        confidence: high
+        reason: parses net/http request form data
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(ParseForm|ParseMultipartForm)\\s*\\("
+
+      - id: go-stream-read
+        kind: stream_or_network_read
+        confidence: low
+        low_confidence: true
+        reason: generic Go stream read
+        conditions:
+          node_labels_any:
+            - Call
+            - MemberCall
+          code_regex: "\\.\\s*(Read|ReadFrom|ReadString|ReadBytes|Scan|Fscan|Fscanf)\\s*\\("
+
+      - id: go-os-args-subscript
+        kind: command_line_arguments
+        confidence: high
+        reason: os.Args contains command-line input
+        conditions:
+          node_labels_any:
+            - Subscription
+          code_regex: "\\bos\\.Args\\s*\\["
+
+      - id: go-http-map-access
+        kind: http_request_field
+        confidence: high
+        reason: net/http request map access
+        conditions:
+          node_labels_any:
+            - Subscription
+          code_regex: "\\.\\s*(Form|PostForm|Header)\\s*\\["
+
+      - id: go-os-args-reference
+        kind: command_line_arguments
+        confidence: high
+        reason: os.Args contains command-line input
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex_match: "^\\s*os\\.Args(\\s*\\[|\\s*$)"
+
+      - id: go-request-body-reference
+        kind: http_request_body
+        confidence: medium
+        reason: request body field
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex: "\\.Body\\s*$"
+
+      - id: go-stdin-reference
+        kind: stdin
+        confidence: high
+        reason: standard input stream
+        conditions:
+          node_labels_any:
+            - Reference
+            - MemberAccess
+          code_regex_match: "^\\s*(os\\.Stdin(\\.|\\s*$)|Stdin\\s*$)"

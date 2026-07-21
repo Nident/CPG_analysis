@@ -90,6 +90,14 @@ user_prompt: |
   - Do not assign high probability solely because a path reaches a sink.
   - For every path, inspect sink.context.arguments and explain whether the dangerous
     argument itself is controlled, constant, derived from another variable, or unknown.
+  - For sink_kind xml_parser_security_api, evaluate XML parser misuse in addition
+    to ordinary taint flow. Check whether DocumentBuilderFactory, SAXParserFactory,
+    XMLInputFactory, SchemaFactory, TransformerFactory, XmlMapper, JAXB, dom4j,
+    JDOM, or XStream parsing is used on attacker-influenced or externally supplied
+    XML, and whether nearby code disables DTDs/external entities/external DTD
+    loading or sets secure processing / a safe EntityResolver. Missing hardening
+    can be relevant even when the graph path does not directly reach a later
+    filesystem or network sink.
   - Use expanded_context to look beyond first-order sinks such as json.load,
     json.loads, yaml.safe_load, argparse, and common_config.parse. If parsed data
     later reaches file writes, chmod/chown, subprocess, template rendering, archive
