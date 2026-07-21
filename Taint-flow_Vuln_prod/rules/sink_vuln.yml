@@ -10,16 +10,6 @@ inputs:
   xml_context_file: contexts.json
   semantic_contexts: rules/semantic_contexts.yml
 
-payload:
-  max_paths: 10
-  max_code_chars: 1200
-  include_sections:
-    - source_path_record
-    - previous_source_analysis
-    - expanded_context
-    - interprocedural_context
-    - semantic_contexts
-
 output:
   save_prompts: true
   result_file: "{input_stem}_{status}.json"

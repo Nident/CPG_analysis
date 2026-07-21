@@ -1,0 +1,28 @@
+---
+version: 1
+description: Shared payload shaping rules for model inputs. Empty lists and null limits keep the full payload.
+
+defaults:
+  include_paths: []
+  exclude_paths: []
+  list_limits: {}
+  text_key_limits: {}
+  text_path_limits: {}
+  max_json_chars:
+
+profiles:
+  source_risk:
+    include_paths: []
+    exclude_paths: []
+    list_limits: {}
+    text_key_limits: {}
+    text_path_limits: {}
+    max_json_chars:
+
+  sink_vuln:
+    include_paths: []
+    exclude_paths: []
+    list_limits: {}
+    text_key_limits: {}
+    text_path_limits: {}
+    max_json_chars:

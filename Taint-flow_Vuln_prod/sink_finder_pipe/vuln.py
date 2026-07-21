@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from model import ModelClient
 from sink_finder_pipe.semantic_context import SemanticContextRegistry
 from utils.env_utils import env_optional_int, env_optional_path, env_path, env_str, load_env
+from utils.payload_builder import PayloadBuilder
 
 
 class SourceAssessment(BaseModel):
@@ -74,6 +75,8 @@ class SinkVulnPipeline:
         self.limit = env_optional_int("SINK_VULN_LIMIT")
         self.parallel_workers = env_optional_int("SINK_VULN_PARALLEL_WORKERS")
         self.rules = self.read_yaml(self.rules_path)
+        self.payload_rules_path = self.project_path(env_optional_path("SINK_VULN_PAYLOAD_RULES") or Path("rules/payload.yml"))
+        self.payload_builder = PayloadBuilder(self.read_yaml(self.payload_rules_path))
         self.semantic_rules_path = self.project_path(env_optional_path("SINK_VULN_SEMANTIC_CONTEXTS") or Path(self.rules["inputs"]["semantic_contexts"]))
         self.semantic_contexts = SemanticContextRegistry(self.project_dir, self.read_yaml(self.semantic_rules_path), self.read_yaml)
         self.model_config = self.model_profile()
@@ -115,6 +118,7 @@ class SinkVulnPipeline:
             "interproceduralContextDir": str(self.interprocedural_dir),
             "xmlContextDir": str(self.xml_context_dir) if self.xml_context_dir is not None else None,
             "rulesFile": str(self.rules_path),
+            "payloadRulesFile": str(self.payload_rules_path),
             "semanticContextRulesFile": str(self.semantic_rules_path),
             "modelConfigFile": str(self.model_config_path),
             "modelName": self.model_name,
@@ -131,7 +135,7 @@ class SinkVulnPipeline:
         source_id = self.optional_int(source_path_record.get("sourceNodeId"))
         payload = self.payload(source_path_record, source_id, indexes)
         prompt_path = self.output_dir / self.prompt_filename(path) if self.rules["output"]["save_prompts"] else None
-        analysis = self.client.request(json.dumps(payload, ensure_ascii=False, indent=2), prompt_output_path=prompt_path)
+        analysis = self.client.request(self.payload_builder.dumps("sink_vuln", payload), prompt_output_path=prompt_path)
         return {
             "status": "ok",
             "sourceNodeId": source_id,
@@ -152,13 +156,13 @@ class SinkVulnPipeline:
             raise TypeError("external_contexts index must be a mapping")
         semantic_contexts = self.semantic_contexts.build_all(source_path_record, source_analysis, expanded_context, interprocedural_context, external_contexts)
         sections = {
-            "source_path_record": self.limit_path_record(source_path_record),
+            "source_path_record": source_path_record,
             "previous_source_analysis": source_analysis,
             "expanded_context": expanded_context,
             "interprocedural_context": interprocedural_context,
             "semantic_contexts": semantic_contexts,
         }
-        return {key: self.limit_code(sections[key]) for key in self.rules["payload"]["include_sections"]}
+        return self.payload_builder.build("sink_vuln", sections)
 
     def path_files(self) -> list[Path]:
         if not self.sink_paths_dir.is_dir():
@@ -210,27 +214,6 @@ class SinkVulnPipeline:
                 if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"] not in files:
                     files.append(item["path"])
         return files
-
-    def limit_path_record(self, record: dict[str, Any]) -> dict[str, Any]:
-        data = self.limit_code(record)
-        paths = data.get("paths")
-        if isinstance(paths, list):
-            max_paths = self.rules["payload"]["max_paths"]
-            data["paths"] = paths[:max_paths]
-            data["omittedPathCount"] = max(0, len(paths) - max_paths)
-        return data
-
-    def limit_code(self, value: Any) -> Any:
-        max_chars = self.rules["payload"]["max_code_chars"]
-        if isinstance(value, dict):
-            return {key: self.truncate_text(item, max_chars) if key == "code" and isinstance(item, str) else self.limit_code(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [self.limit_code(item) for item in value]
-        return value
-
-    @staticmethod
-    def truncate_text(value: str, max_chars: int) -> str:
-        return value if len(value) <= max_chars else value[:max_chars] + "\n...<truncated>"
 
     def model_client(self) -> ModelClient[SinkVulnerabilityAnalysis]:
         prompt = self.rules["prompt"]

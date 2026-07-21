@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from model import ModelClient
 from utils.env_utils import env_optional_int, env_optional_path, env_path, env_str, load_env
+from utils.payload_builder import PayloadBuilder
 
 
 class RiskHypothesis(BaseModel):
@@ -55,6 +56,8 @@ class SourceRiskModel:
         self.parallel_workers = env_optional_int("SOURCE_RISK_PARALLEL_WORKERS")
         self.model_config = self.model_profile()
         self.rules = self.read_yaml(self.rules_path)
+        self.payload_rules_path = self.project_path(env_optional_path("SOURCE_RISK_PAYLOAD_RULES") or Path("rules/payload.yml"))
+        self.payload_builder = PayloadBuilder(self.read_yaml(self.payload_rules_path))
         self.client = self.model_client()
 
     def run(self) -> dict[str, Any]:
@@ -98,6 +101,7 @@ class SourceRiskModel:
             "status": "ok",
             "sourcesFile": str(self.sources_path),
             "rulesFile": str(self.rules_path),
+            "payloadRulesFile": str(self.payload_rules_path),
             "modelConfigFile": str(self.model_config_path),
             "modelName": self.model_name,
             "outputDir": str(self.output_dir),
@@ -109,11 +113,8 @@ class SourceRiskModel:
         return summary
 
     def analyze_one(self, source: dict[str, Any], index: int) -> dict[str, Any]:
-        source_json = json.dumps(self.payload_source(source), ensure_ascii=False, indent=2)
-        max_chars = self.int_setting(self.rules["payload"]["max_chars"], "payload.max_chars")
-        if len(source_json) > max_chars:
-            source_json = source_json[:max_chars]
-
+        payload = self.payload_builder.build("source_risk", source)
+        source_json = self.payload_builder.dumps("source_risk", payload)
         prompt_path = self.output_dir / self.prompt_filename(source, index) if self.save_prompts() else None
         analysis = self.client.request(source_json, prompt_output_path=prompt_path)
         return {
@@ -127,10 +128,6 @@ class SourceRiskModel:
             "ruleId": source.get("ruleId"),
             "analysis": analysis.model_dump(),
         }
-
-    def payload_source(self, source: dict[str, Any]) -> dict[str, Any]:
-        fields = self.string_list(self.rules["payload"]["include_fields"], "payload.include_fields")
-        return {field: source[field] for field in fields if field in source}
 
     def candidate_sources(self) -> list[dict[str, Any]]:
         data = self.read_json(self.sources_path)
@@ -235,12 +232,6 @@ class SourceRiskModel:
         if not isinstance(value, list):
             raise TypeError(f"{name} must be a list")
         return value
-
-    @staticmethod
-    def string_list(value: Any, name: str) -> list[str]:
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise TypeError(f"{name} must be a list of strings")
-        return cast(list[str], value)
 
     @staticmethod
     def str_setting(value: Any, name: str) -> str:

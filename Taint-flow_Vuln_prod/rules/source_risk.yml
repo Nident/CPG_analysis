@@ -2,26 +2,6 @@
 version: 1
 description: Source risk LLM triage settings and prompt.
 
-payload:
-  max_chars: 6000
-  include_fields:
-    - nodeId
-    - language
-    - ruleId
-    - kind
-    - confidence
-    - reason
-    - artifact
-    - startLine
-    - endLine
-    - labels
-    - name
-    - fullName
-    - code
-    - assignedTo
-    - enclosingFunction
-    - dataflow
-
 output:
   save_prompts: true
   result_file: "{index:06d}_{node_part}_{status}.json"
