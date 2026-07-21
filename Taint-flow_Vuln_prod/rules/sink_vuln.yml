@@ -4,6 +4,7 @@ description: Sink vulnerability LLM verification prompt, payload, input, and out
 
 inputs:
   sink_path_glob: "*_ok.json"
+  sink_candidates_file: sink_candidates.json
   source_risk_glob: "*_ok.json"
   context_expansion_glob: "*_context_ok.json"
   interprocedural_context_glob: "*_interprocedural_ok.json"
@@ -19,17 +20,26 @@ output:
 prompt:
   system_prompt: |
     You are a senior application security reviewer. Verify whether candidate
-    source-to-sink paths represent plausible vulnerabilities. Treat graph paths
-    and deterministic context as evidence, not proof.
+    security-sensitive sinks are plausibly vulnerable. Treat graph paths and
+    deterministic context as evidence, not proof.
 
   user_prompt: |
-    Analyze the following source-to-sink path bundle.
+    Analyze the following sink-centered vulnerability bundle.
 
     Payload sections:
-    - source_path_record: source metadata and candidate paths to sinks.
-    - previous_source_analysis: earlier source-risk hypotheses, or null.
-    - expanded_context: deterministic downstream CPG expansion, or null.
-    - interprocedural_context: synthetic cross-function propagation context, or null.
+    - source_path_record: sink-centered record. If source-to-sink paths exist,
+      they are included in paths. If not, paths contains one synthetic sink-only
+      context with sourceReachesSink=false.
+    - sink_candidate: the primary sink candidate and its local context.
+    - previous_source_analysis: earlier source-risk hypotheses for the first
+      related source, or null.
+    - expanded_context: deterministic downstream CPG expansion for the first
+      related source, or null.
+    - interprocedural_context: synthetic cross-function propagation context for
+      the first related source, or null.
+    - related_previous_source_analyses, related_expanded_contexts,
+      related_interprocedural_contexts: all related source contexts when paths
+      exist.
     - semantic_contexts: optional sink-family evidence. Context families are not
       CWE verdicts. Use them to reason about parser, path/object, output encoding,
       and future security-sensitive zones.
@@ -39,7 +49,7 @@ prompt:
     {
       "vulnerability_probability": 0.0,
       "candidate_cwes": [],
-      "summary": "Short overall conclusion for this source.",
+      "summary": "Short overall conclusion for this sink.",
       "source_assessment": {
         "attacker_control": "none | partial | full | unknown",
         "trust_boundary": "Short description of who controls the source.",
@@ -83,10 +93,15 @@ prompt:
     - Return probabilities, not categorical verdicts.
     - vulnerability_probability must be 0.0 to 1.0.
     - Keep all lists short and high signal.
-    - Use path.evidence.pathQuality as the main reliability signal.
+    - Use path.evidence.pathQuality as the main reliability signal when a real
+      source-to-sink path exists.
     - High probability requires attacker-controlled data plausibly reaching the
       dangerous sink argument without adequate guards.
     - Do not assign high probability only because a path reaches a sink.
+    - When source_path_record.analysisMode is sink_centric and a path has
+      sourceReachesSink=false or pathQuality=sink_only_context, still analyze
+      the sink's local security posture. In that mode, report unknown
+      reachability as a blocking condition instead of ignoring the sink.
     - For every path, inspect sink.context.arguments and state whether the dangerous
       argument is controlled, constant, derived, guarded, or unknown.
     - Use expanded_context and interprocedural_context to support or weaken the
@@ -100,6 +115,14 @@ prompt:
     - For parser contexts, ask whether attacker-controlled bytes reach a parser or
       deserializer without effective hardening, schema/type restrictions, or safe
       loader behavior.
+    - For XML parser sinks, inspect factory/parser creation and nearby calls for
+      hardening such as disallow-doctype-decl, external-general-entities=false,
+      external-parameter-entities=false, load-external-dtd=false,
+      XIncludeAware=false, ExpandEntityReferences=false, ACCESS_EXTERNAL_DTD="",
+      ACCESS_EXTERNAL_SCHEMA="", and secure-processing. If hardening is absent
+      and the parsed input is a parameter, request body, file content, CLI input,
+      or otherwise externally influenced, CWE-611 should be considered even when
+      the exact upstream source path is missing.
     - For path/object contexts, distinguish local filesystem traversal from object
       store key operations. Do not report CWE-22 unless local path traversal or
       filesystem escape is plausible.

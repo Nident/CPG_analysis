@@ -83,11 +83,14 @@ class SinkVulnPipeline:
         self.client = self.model_client()
 
     def run(self) -> dict[str, Any]:
-        files = self.path_files()
-        if self.limit is not None:
-            files = files[: self.limit]
+        source_path_files = self.path_files()
         workers = self.parallel_workers or self.int_value(self.model_config["parallel_workers"], "parallel_workers")
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        source_path_records = [self.source_path_entry(path) for path in source_path_files]
+        jobs = self.sink_jobs(source_path_records)
+        if self.limit is not None:
+            jobs = jobs[: self.limit]
 
         indexes = {
             "source": self.index_dir(self.source_risk_dir, self.rules["inputs"]["source_risk_glob"]),
@@ -98,17 +101,25 @@ class SinkVulnPipeline:
 
         results: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self.analyze_file, path, indexes): path for path in files}
+            futures = {executor.submit(self.analyze_job, job, indexes): job for job in jobs}
             for done, future in enumerate(as_completed(futures), start=1):
-                path = futures[future]
+                job = futures[future]
                 try:
                     record = future.result()
                 except Exception as error:
-                    record = self.error_record(path, indexes, error)
-                output_file = self.output_dir / self.result_filename(path, record["status"])
+                    record = self.error_record(job, indexes, error)
+                output_file = self.output_dir / self.result_filename(job["inputStem"], record["status"])
                 self.write_json(output_file, record)
-                results.append({"inputFile": str(path), "outputFile": output_file.name, "sourceNodeId": record.get("sourceNodeId"), "status": record["status"]})
-                print(f"[{done}/{len(files)}] saved {record['status']} sourceNodeId={record.get('sourceNodeId')} -> {output_file}", file=sys.stderr)
+                results.append(
+                    {
+                        "inputFile": job.get("inputFile"),
+                        "outputFile": output_file.name,
+                        "sourceNodeIds": record.get("sourceNodeIds", []),
+                        "sinkNodeId": record.get("sinkNodeId"),
+                        "status": record["status"],
+                    }
+                )
+                print(f"[{done}/{len(jobs)}] saved {record['status']} sinkNodeId={record.get('sinkNodeId')} -> {output_file}", file=sys.stderr)
 
         summary = {
             "status": "ok",
@@ -123,51 +134,155 @@ class SinkVulnPipeline:
             "modelConfigFile": str(self.model_config_path),
             "modelName": self.model_name,
             "outputDir": str(self.output_dir),
-            "fileCount": len(files),
+            "sourcePathFileCount": len(source_path_files),
+            "sinkJobCount": len(jobs),
+            "fileCount": len(jobs),
             "parallelWorkers": workers,
-            "results": sorted(results, key=lambda item: item["inputFile"]),
+            "results": sorted(results, key=lambda item: item["outputFile"]),
         }
         self.write_json(self.output_dir / self.rules["output"]["summary_file"], summary)
         return summary
 
-    def analyze_file(self, path: Path, indexes: dict[str, Any]) -> dict[str, Any]:
-        source_path_record = self.read_json(path)
-        source_id = self.optional_int(source_path_record.get("sourceNodeId"))
-        payload = self.payload(source_path_record, source_id, indexes)
-        prompt_path = self.output_dir / self.prompt_filename(path) if self.rules["output"]["save_prompts"] else None
+    def analyze_job(self, job: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
+        source_path_record = self.object_value(job["record"], "job.record")
+        source_ids = self.int_list(job.get("sourceNodeIds", []), "job.sourceNodeIds")
+        payload = self.payload(source_path_record, source_ids, indexes)
+        prompt_path = self.output_dir / self.prompt_filename(job["inputStem"]) if self.rules["output"]["save_prompts"] else None
         analysis = self.client.request(self.payload_builder.dumps("sink_vuln", payload), prompt_output_path=prompt_path)
         return {
             "status": "ok",
-            "sourceNodeId": source_id,
-            "inputFile": str(path),
-            "previousSourceAnalysisFile": self.index_file(indexes["source"].get(source_id)),
-            "contextExpansionFile": self.index_file(indexes["context"].get(source_id)),
-            "interproceduralContextFile": self.index_file(indexes["interprocedural"].get(source_id)),
+            "analysisMode": source_path_record.get("analysisMode"),
+            "sourceNodeIds": source_ids,
+            "sourceNodeId": source_ids[0] if source_ids else None,
+            "sinkNodeId": job.get("sinkNodeId"),
+            "inputFile": job.get("inputFile"),
+            "previousSourceAnalysisFiles": [self.index_file(indexes["source"].get(source_id)) for source_id in source_ids],
+            "contextExpansionFiles": [self.index_file(indexes["context"].get(source_id)) for source_id in source_ids],
+            "interproceduralContextFiles": [self.index_file(indexes["interprocedural"].get(source_id)) for source_id in source_ids],
             "semanticContextFiles": self.semantic_context_files(payload.get("semantic_contexts")),
             "analysis": analysis.model_dump(),
         }
 
-    def payload(self, source_path_record: dict[str, Any], source_id: int | None, indexes: dict[str, Any]) -> dict[str, Any]:
-        source_analysis = self.index_data(indexes["source"].get(source_id))
-        expanded_context = self.index_data(indexes["context"].get(source_id))
-        interprocedural_context = self.index_data(indexes["interprocedural"].get(source_id))
+    def payload(self, source_path_record: dict[str, Any], source_ids: list[int], indexes: dict[str, Any]) -> dict[str, Any]:
+        source_analysis = self.index_data(indexes["source"].get(source_ids[0])) if source_ids else None
+        expanded_context = self.index_data(indexes["context"].get(source_ids[0])) if source_ids else None
+        interprocedural_context = self.index_data(indexes["interprocedural"].get(source_ids[0])) if source_ids else None
+        related_source_analyses = [self.index_data(indexes["source"].get(source_id)) for source_id in source_ids]
+        related_expanded_contexts = [self.index_data(indexes["context"].get(source_id)) for source_id in source_ids]
+        related_interprocedural_contexts = [self.index_data(indexes["interprocedural"].get(source_id)) for source_id in source_ids]
         external_contexts = indexes["external_contexts"]
         if not isinstance(external_contexts, dict):
             raise TypeError("external_contexts index must be a mapping")
         semantic_contexts = self.semantic_contexts.build_all(source_path_record, source_analysis, expanded_context, interprocedural_context, external_contexts)
         sections = {
             "source_path_record": source_path_record,
+            "sink_candidate": source_path_record.get("sinkCandidate"),
             "previous_source_analysis": source_analysis,
             "expanded_context": expanded_context,
             "interprocedural_context": interprocedural_context,
+            "related_previous_source_analyses": related_source_analyses,
+            "related_expanded_contexts": related_expanded_contexts,
+            "related_interprocedural_contexts": related_interprocedural_contexts,
             "semantic_contexts": semantic_contexts,
         }
         return self.payload_builder.build("sink_vuln", sections)
+
+    def source_path_entry(self, path: Path) -> dict[str, Any]:
+        record = self.read_json(path)
+        return {"path": path, "record": record}
+
+    def sink_jobs(self, source_path_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped_paths = self.paths_by_sink(source_path_entries)
+        jobs: list[dict[str, Any]] = []
+        for index, sink in enumerate(self.sink_candidates(), start=1):
+            sink_id = self.sink_id(sink)
+            if sink_id is None:
+                continue
+            paths = grouped_paths.get(sink_id, [])
+            source_ids = sorted({item["sourceNodeId"] for item in paths if isinstance(item.get("sourceNodeId"), int)})
+            record = self.sink_record(sink, sink_id, paths)
+            jobs.append(
+                {
+                    "inputStem": f"{index:06d}_sink_node_{sink_id}",
+                    "sinkNodeId": sink_id,
+                    "sourceNodeIds": source_ids,
+                    "inputFile": str(self.sink_candidates_path()),
+                    "record": record,
+                }
+            )
+        return jobs
+
+    def paths_by_sink(self, source_path_entries: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+        result: dict[int, list[dict[str, Any]]] = {}
+        for entry in source_path_entries:
+            record = self.object_value(entry["record"], "source_path_record")
+            source_id = self.optional_int(record.get("sourceNodeId"))
+            for path_index, path in enumerate(record.get("paths", [])):
+                if not isinstance(path, dict):
+                    continue
+                sink = path.get("sink")
+                if not isinstance(sink, dict):
+                    continue
+                sink_id = self.optional_int(sink.get("nodeId"))
+                if sink_id is None:
+                    continue
+                enriched = dict(path)
+                enriched["sourceNodeId"] = source_id
+                enriched["source"] = record.get("source")
+                enriched["sourcePathIndex"] = path_index
+                enriched["sourcePathFile"] = str(entry["path"])
+                result.setdefault(sink_id, []).append(enriched)
+        return result
+
+    def sink_record(self, sink: dict[str, Any], sink_id: int, paths: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "analysisMode": "sink_centric",
+            "sourceNodeId": None,
+            "sourceNodeIds": sorted({path["sourceNodeId"] for path in paths if isinstance(path.get("sourceNodeId"), int)}),
+            "sinkNodeId": sink_id,
+            "sinkCandidate": sink,
+            "reachableSourcePathCount": len(paths),
+            "paths": paths if paths else [self.synthetic_sink_path(sink, sink_id)],
+        }
+
+    @staticmethod
+    def synthetic_sink_path(sink: dict[str, Any], sink_id: int) -> dict[str, Any]:
+        return {
+            "sourceNodeId": None,
+            "sink": sink,
+            "path": [{"node": sink.get("node"), "role": "sink"}],
+            "evidence": {
+                "pathQuality": "sink_only_context",
+                "sourceReachesSink": False,
+                "reason": "No source-to-sink path was found. Analyze sink configuration and local context.",
+            },
+            "sourcePathIndex": None,
+        }
 
     def path_files(self) -> list[Path]:
         if not self.sink_paths_dir.is_dir():
             raise ValueError(f"{self.sink_paths_dir}: sink paths input must be a directory")
         return sorted(self.sink_paths_dir.glob(self.rules["inputs"]["sink_path_glob"]))
+
+    def sink_candidates(self) -> list[dict[str, Any]]:
+        path = self.sink_candidates_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise TypeError(f"{path}: expected JSON list")
+        return [self.object_value(item, "sink_candidate") for item in data]
+
+    def sink_candidates_path(self) -> Path:
+        return self.sink_paths_dir / self.str_value(self.rules["inputs"]["sink_candidates_file"], "inputs.sink_candidates_file")
+
+    @staticmethod
+    def sink_id(sink: dict[str, Any]) -> int | None:
+        node_id = sink.get("nodeId")
+        if isinstance(node_id, int):
+            return node_id
+        node = sink.get("node")
+        if isinstance(node, dict) and isinstance(node.get("nodeId"), int):
+            return node["nodeId"]
+        return None
 
     def index_dir(self, path: Path, pattern: str) -> dict[int, dict[str, Any]]:
         if not path.exists():
@@ -240,24 +355,26 @@ class SinkVulnPipeline:
         prompt = Path(self.str_value(profile["prompt_file"], "prompt_file"))
         return prompt if prompt.is_absolute() else self.model_config_path.parent / prompt
 
-    def error_record(self, path: Path, indexes: dict[str, Any], error: Exception) -> dict[str, Any]:
-        source_id = self.optional_int(self.read_json(path).get("sourceNodeId"))
+    def error_record(self, job: dict[str, Any], indexes: dict[str, Any], error: Exception) -> dict[str, Any]:
+        source_ids = self.int_list(job.get("sourceNodeIds", []), "job.sourceNodeIds")
         return {
             "status": "error",
-            "sourceNodeId": source_id,
-            "inputFile": str(path),
-            "previousSourceAnalysisFile": self.index_file(indexes["source"].get(source_id)),
-            "contextExpansionFile": self.index_file(indexes["context"].get(source_id)),
-            "interproceduralContextFile": self.index_file(indexes["interprocedural"].get(source_id)),
+            "sourceNodeIds": source_ids,
+            "sourceNodeId": source_ids[0] if source_ids else None,
+            "sinkNodeId": job.get("sinkNodeId"),
+            "inputFile": job.get("inputFile"),
+            "previousSourceAnalysisFiles": [self.index_file(indexes["source"].get(source_id)) for source_id in source_ids],
+            "contextExpansionFiles": [self.index_file(indexes["context"].get(source_id)) for source_id in source_ids],
+            "interproceduralContextFiles": [self.index_file(indexes["interprocedural"].get(source_id)) for source_id in source_ids],
             "semanticContextFiles": [],
             "error": {"type": type(error).__name__, "message": str(error)},
         }
 
-    def result_filename(self, path: Path, status: str) -> str:
-        return self.rules["output"]["result_file"].format(input_stem=path.stem.removesuffix("_ok"), status=status)
+    def result_filename(self, input_stem: str, status: str) -> str:
+        return self.rules["output"]["result_file"].format(input_stem=input_stem, status=status)
 
-    def prompt_filename(self, path: Path) -> str:
-        return self.rules["output"]["prompt_file"].format(input_stem=path.stem.removesuffix("_ok"))
+    def prompt_filename(self, input_stem: str) -> str:
+        return self.rules["output"]["prompt_file"].format(input_stem=input_stem)
 
     @staticmethod
     def index_data(entry: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -300,6 +417,12 @@ class SinkVulnPipeline:
     @staticmethod
     def optional_int(value: Any) -> int | None:
         return value if isinstance(value, int) else None
+
+    @staticmethod
+    def int_list(value: Any, name: str) -> list[int]:
+        if not isinstance(value, list) or not all(isinstance(item, int) for item in value):
+            raise TypeError(f"{name} must be list[int]")
+        return cast(list[int], value)
 
     @staticmethod
     def str_value(value: Any, name: str) -> str:

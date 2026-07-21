@@ -3,6 +3,33 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+GLOBAL_ENV_FILE="${GLOBAL_ENV_FILE:-${ROOT_DIR}/config/.env}"
+
+load_global_env() {
+  local env_file="$1"
+  local line key value
+
+  [[ -f "${env_file}" ]] || return 0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    if [[ -z "${!key:-}" ]]; then
+      export "${key}=${value}"
+    fi
+  done < "${env_file}"
+}
+
+load_global_env "${GLOBAL_ENV_FILE}"
+PROJECT_NAME="${1:-${PROJECT_NAME:-}}"
 
 RUN_SOURCE_CANDIDATES="${RUN_SOURCE_CANDIDATES:-1}"
 RUN_SOURCE_RISK="${RUN_SOURCE_RISK:-1}"
@@ -43,6 +70,13 @@ run_step() {
 printf 'CPG analysis pipeline\n'
 printf 'root: %s\n' "${ROOT_DIR}"
 printf 'python: %s\n' "${PYTHON_BIN}"
+if [[ -z "${PROJECT_NAME}" ]]; then
+  printf '[error] PROJECT_NAME is required. Example:\n' >&2
+  printf '        %s gematik__app-referencevalidator/cpg_gematik__app-referencevalidator__d6d27613fab7\n' "$0" >&2
+  exit 1
+fi
+export PROJECT_NAME
+printf 'project: %s\n' "${PROJECT_NAME}"
 
 run_step \
   "${RUN_SOURCE_CANDIDATES}" \
