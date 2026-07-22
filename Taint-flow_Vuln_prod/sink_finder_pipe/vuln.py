@@ -72,6 +72,7 @@ class SinkVulnPipeline:
         self.model_config_path = self.project_path(env_path("SINK_VULN_MODEL_CONFIG"))
         self.model_name = env_str("SINK_VULN_MODEL_NAME")
         self.rules_path = self.project_path(env_optional_path("SINK_VULN_RULES") or self.model_prompt_path())
+        self.max_model_requests = env_optional_int("SINK_VULN_MAX_MODEL_REQUESTS")
         self.limit = env_optional_int("SINK_VULN_LIMIT")
         self.parallel_workers = env_optional_int("SINK_VULN_PARALLEL_WORKERS")
         self.rules = self.read_yaml(self.rules_path)
@@ -89,8 +90,10 @@ class SinkVulnPipeline:
 
         source_path_records = [self.source_path_entry(path) for path in source_path_files]
         jobs = self.sink_jobs(source_path_records)
-        if self.limit is not None:
-            jobs = jobs[: self.limit]
+        request_limit = self.request_limit()
+        total_sink_jobs = len(jobs)
+        if request_limit is not None:
+            jobs = jobs[: request_limit]
 
         indexes = {
             "source": self.index_dir(self.source_risk_dir, self.rules["inputs"]["source_risk_glob"]),
@@ -134,6 +137,8 @@ class SinkVulnPipeline:
             "modelConfigFile": str(self.model_config_path),
             "modelName": self.model_name,
             "outputDir": str(self.output_dir),
+            "totalSinkJobCount": total_sink_jobs,
+            "maxModelRequests": request_limit,
             "sourcePathFileCount": len(source_path_files),
             "sinkJobCount": len(jobs),
             "fileCount": len(jobs),
@@ -142,6 +147,12 @@ class SinkVulnPipeline:
         }
         self.write_json(self.output_dir / self.rules["output"]["summary_file"], summary)
         return summary
+
+    def request_limit(self) -> int | None:
+        limit = self.max_model_requests if self.max_model_requests is not None else self.limit
+        if limit is not None and limit < 0:
+            raise ValueError("SINK_VULN_MAX_MODEL_REQUESTS must be >= 0")
+        return limit
 
     def analyze_job(self, job: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
         source_path_record = self.object_value(job["record"], "job.record")
